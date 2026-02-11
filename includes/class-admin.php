@@ -359,8 +359,11 @@ class WOO_RS_Admin {
         if ( ! empty( $_GET['saved'] ) ) {
             echo '<div class="notice notice-success is-dismissible"><p>Settings saved.</p></div>';
         }
-        if ( isset( $_GET['update_check'] ) && 'update_available' === $_GET['update_check'] ) {
-            echo '<div class="notice notice-warning is-dismissible"><p>A new version of Woo RS Product Sync is available. <a href="' . esc_url( admin_url( 'update-core.php' ) ) . '">Update now</a></p></div>';
+        if ( isset( $_GET['update_check'] ) ) {
+            $update_available = self::is_update_available();
+            if ( $update_available ) {
+                echo '<div class="notice notice-warning is-dismissible"><p>A new version of Woo RS Product Sync is available. <a href="' . esc_url( admin_url( 'update-core.php' ) ) . '">Update now</a></p></div>';
+            }
         }
     }
 
@@ -469,7 +472,7 @@ class WOO_RS_Admin {
             <h2>Plugin Updates</h2>
             <p>Current version: <strong>v<?php echo esc_html( WOO_RS_PRODUCT_SYNC_VERSION ); ?></strong>
             <?php if ( isset( $_GET['update_check'] ) ) : ?>
-                <?php if ( 'update_available' === $_GET['update_check'] ) : ?>
+                <?php if ( self::is_update_available() ) : ?>
                     &mdash; <span style="color:#b32d2e;">Update available!</span> <a href="<?php echo esc_url( admin_url( 'update-core.php' ) ); ?>">Update now</a>
                 <?php else : ?>
                     &mdash; <span style="color:#00a32a;">Up to date</span>
@@ -826,6 +829,15 @@ class WOO_RS_Admin {
     /* ───────────────────────────────────────────────────
      * Helpers
      * ─────────────────────────────────────────────────── */
+
+    private static function is_update_available() {
+        $release = get_transient( WOO_RS_Updater::CACHE_KEY );
+        if ( ! $release || empty( $release->tag_name ) ) {
+            return false;
+        }
+        $remote_version = ltrim( $release->tag_name, 'v' );
+        return version_compare( WOO_RS_PRODUCT_SYNC_VERSION, $remote_version, '<' );
+    }
 
     private static function mask_key( $key, $visible = 4 ) {
         if ( empty( $key ) ) {

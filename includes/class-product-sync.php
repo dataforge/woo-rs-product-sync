@@ -216,15 +216,20 @@ class WOO_RS_Product_Sync {
             }
         }
 
+        // Update WC categories only when the RS category changed (simple products only).
+        // This preserves any extra WooCommerce categories added manually.
+        // Must run BEFORE apply_meta() which overwrites the stored _rs_category.
+        if ( ! $is_variation && isset( $rs_product['product_category'] ) ) {
+            $old_rs_cat = get_post_meta( $wc_product_id, '_rs_category', true );
+            if ( (string) $old_rs_cat !== (string) $rs_product['product_category'] ) {
+                self::assign_wc_categories( $wc_product_id, $rs_product );
+            }
+        }
+
         // Update meta fields
         $meta_changes = self::apply_meta( $wc_product_id, $rs_product );
         if ( ! empty( $meta_changes ) ) {
             $changes['meta'] = $meta_changes;
-        }
-
-        // Update WC categories (simple products only)
-        if ( ! $is_variation ) {
-            self::assign_wc_categories( $wc_product_id, $rs_product );
         }
 
         // Update RS product ID meta for fallback lookups
