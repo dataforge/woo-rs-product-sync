@@ -53,7 +53,7 @@ class WOO_RS_Updater {
             'slug'    => self::SLUG,
             'version' => $remote_version,
             'url'     => $release->html_url,
-            'package' => $release->zipball_url,
+            'package' => self::get_asset_url( $release ),
         );
     }
 
@@ -127,13 +127,30 @@ class WOO_RS_Updater {
         $info->homepage    = 'https://github.com/' . self::GITHUB_REPO;
         $info->requires    = '5.8';
         $info->requires_php = '7.2';
-        $info->download_link = $release->zipball_url;
+        $info->download_link = self::get_asset_url( $release );
         $info->sections    = array(
             'description' => 'Syncs products from RepairShopr to WooCommerce via webhooks and scheduled API polling.',
             'changelog'   => nl2br( esc_html( $release->body ?? '' ) ),
         );
 
         return $info;
+    }
+
+    /**
+     * Get the download URL for the attached .zip asset, falling back to zipball.
+     *
+     * @param object $release  GitHub release object.
+     * @return string
+     */
+    private static function get_asset_url( $release ) {
+        if ( ! empty( $release->assets ) ) {
+            foreach ( $release->assets as $asset ) {
+                if ( '.zip' === substr( $asset->name, -4 ) ) {
+                    return $asset->browser_download_url;
+                }
+            }
+        }
+        return $release->zipball_url;
     }
 
     /**
