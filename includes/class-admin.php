@@ -22,6 +22,9 @@ class WOO_RS_Admin {
      */
     public static function action_links( $links ) {
         $settings_link = '<a href="' . esc_url( admin_url( 'admin.php?page=woo-rs-product-sync' ) ) . '">Settings</a>';
+        $update_url    = wp_nonce_url( admin_url( 'admin-post.php?action=woo_rs_product_sync_check_updates' ), 'woo_rs_product_sync_check_updates' );
+        $update_link   = '<a href="' . esc_url( $update_url ) . '">Check for Updates</a>';
+        array_unshift( $links, $update_link );
         array_unshift( $links, $settings_link );
         return $links;
     }
@@ -356,6 +359,13 @@ class WOO_RS_Admin {
         if ( ! empty( $_GET['saved'] ) ) {
             echo '<div class="notice notice-success is-dismissible"><p>Settings saved.</p></div>';
         }
+        if ( ! empty( $_GET['update_check'] ) ) {
+            if ( 'update_available' === $_GET['update_check'] ) {
+                echo '<div class="notice notice-warning is-dismissible"><p>A new version is available! Visit <a href="' . esc_url( admin_url( 'update-core.php' ) ) . '">Dashboard &rarr; Updates</a> to install it.</p></div>';
+            } else {
+                echo '<div class="notice notice-success is-dismissible"><p>You are running the latest version (v' . esc_html( WOO_RS_PRODUCT_SYNC_VERSION ) . ').</p></div>';
+            }
+        }
     }
 
     /* ── Dashboard Tab ── */
@@ -456,6 +466,17 @@ class WOO_RS_Admin {
                 </div>
                 <div id="woo-rs-sync-status" class="woo-rs-sync-status" style="display:none;"></div>
             <?php endif; ?>
+        </div>
+
+        <!-- Check for Plugin Updates -->
+        <div class="card woo-rs-card">
+            <h2>Plugin Updates</h2>
+            <p>Current version: <strong>v<?php echo esc_html( WOO_RS_PRODUCT_SYNC_VERSION ); ?></strong></p>
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline;">
+                <input type="hidden" name="action" value="woo_rs_product_sync_check_updates" />
+                <?php wp_nonce_field( 'woo_rs_product_sync_check_updates' ); ?>
+                <button type="submit" class="button">Check for Updates</button>
+            </form>
         </div>
         <?php
     }

@@ -21,6 +21,33 @@ class WOO_RS_Updater {
         add_filter( 'update_plugins_github.com', array( __CLASS__, 'check_update' ), 10, 4 );
         add_filter( 'upgrader_install_package_result', array( __CLASS__, 'fix_directory' ), 10, 2 );
         add_filter( 'plugins_api', array( __CLASS__, 'plugin_info' ), 10, 3 );
+        add_action( 'admin_post_woo_rs_product_sync_check_updates', array( __CLASS__, 'handle_check_updates' ) );
+    }
+
+    /**
+     * Admin POST handler: flush the GitHub release cache and force an update check.
+     */
+    public static function handle_check_updates() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Unauthorized' );
+        }
+        check_admin_referer( 'woo_rs_product_sync_check_updates' );
+
+        delete_transient( self::CACHE_KEY );
+        wp_clean_plugins_cache( true );
+        wp_update_plugins();
+
+        $release = self::fetch_latest_release();
+        $status  = 'up_to_date';
+        if ( $release ) {
+            $remote_version = ltrim( $release->tag_name, 'v' );
+            if ( version_compare( WOO_RS_PRODUCT_SYNC_VERSION, $remote_version, '<' ) ) {
+                $status = 'update_available';
+            }
+        }
+
+        wp_safe_redirect( add_query_arg( array( 'update_check' => $status ), admin_url( 'admin.php?page=woo-rs-product-sync' ) ) );
+        exit;
     }
 
     /**

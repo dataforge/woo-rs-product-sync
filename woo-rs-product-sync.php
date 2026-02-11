@@ -3,7 +3,7 @@
  * Plugin Name:       Woo RS Product Sync
  * Plugin URI:        https://github.com/dataforge/woo-rs-product-sync
  * Description:       Syncs products from RepairShopr to WooCommerce via webhooks and scheduled API polling.
- * Version:           0.2.8
+ * Version:           0.2.9
  * Author:            Dataforge
  * Author URI:        https://dataforge.us
  * License:           GPL-2.0-or-later
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'WOO_RS_PRODUCT_SYNC_VERSION', '0.2.8' );
+define( 'WOO_RS_PRODUCT_SYNC_VERSION', '0.2.9' );
 define( 'WOO_RS_PRODUCT_SYNC_FILE', __FILE__ );
 define( 'WOO_RS_PRODUCT_SYNC_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WOO_RS_PRODUCT_SYNC_URL', plugin_dir_url( __FILE__ ) );
