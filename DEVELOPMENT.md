@@ -43,7 +43,7 @@ WordPress/WooCommerce plugin that syncs products from RepairShopr (RS) to WooCom
    ```bash
    # From the plugin directory:
    cd /tmp && rm -rf woo-rs-build && mkdir woo-rs-build
-   rsync -a --exclude='.git' --exclude='.claude' --exclude='_reference' --exclude='.gitignore' \
+   rsync -a --exclude='.git' --exclude='.claude' --exclude='_reference' --exclude='.gitignore' --exclude='CLAUDE.md' \
      /path/to/woo-rs-product-sync/ woo-rs-build/woo-rs-product-sync/
    cd woo-rs-build && zip -r woo-rs-product-sync-X.Y.Z.zip woo-rs-product-sync/
    ```
