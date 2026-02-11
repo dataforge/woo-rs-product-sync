@@ -25,7 +25,11 @@ class WOO_RS_Webhook {
         $stored_key = get_option( 'woo_rs_product_sync_api_key' );
 
         if ( empty( $stored_key ) ) {
-            return true;
+            return new WP_Error(
+                'rest_forbidden',
+                'Webhook API key not configured.',
+                array( 'status' => 403 )
+            );
         }
 
         $provided_key = $request->get_param( 'key' );
@@ -62,7 +66,6 @@ class WOO_RS_Webhook {
         WOO_RS_Logger::log( $method, $headers, $body, $ip );
 
         // Attempt to sync the product
-        $sync_result = null;
         $data = json_decode( $body, true );
 
         if ( $data ) {
@@ -71,13 +74,9 @@ class WOO_RS_Webhook {
 
             if ( ! empty( $rs_product['id'] ) ) {
                 try {
-                    $sync_result = WOO_RS_Product_Sync::sync_product( $rs_product, 'webhook' );
+                    WOO_RS_Product_Sync::sync_product( $rs_product, 'webhook' );
                 } catch ( \Exception $e ) {
                     // Don't let sync errors block the 200 response to RS
-                    $sync_result = array(
-                        'action' => 'error',
-                        'error'  => $e->getMessage(),
-                    );
                 }
             }
         }
@@ -85,7 +84,6 @@ class WOO_RS_Webhook {
         return new WP_REST_Response( array(
             'success' => true,
             'message' => 'Webhook received.',
-            'sync'    => $sync_result,
         ), 200 );
     }
 }

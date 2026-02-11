@@ -144,7 +144,7 @@ class WOO_RS_Admin {
 
         // Logging level
         if ( isset( $_POST['logging_level'] ) ) {
-            $level = sanitize_text_field( $_POST['logging_level'] );
+            $level = sanitize_text_field( wp_unslash( $_POST['logging_level'] ) );
             if ( ! in_array( $level, array( 'none', 'changes_only', 'all' ), true ) ) {
                 $level = 'changes_only';
             }
@@ -153,7 +153,7 @@ class WOO_RS_Admin {
 
         // New product status
         if ( isset( $_POST['new_product_status'] ) ) {
-            $status = sanitize_text_field( $_POST['new_product_status'] );
+            $status = sanitize_text_field( wp_unslash( $_POST['new_product_status'] ) );
             if ( ! in_array( $status, array( 'publish', 'pending', 'draft' ), true ) ) {
                 $status = 'publish';
             }
@@ -296,7 +296,7 @@ class WOO_RS_Admin {
             return;
         }
 
-        $current_tab = isset( $_GET['tab'] ) ? sanitize_text_field( $_GET['tab'] ) : 'dashboard';
+        $current_tab = isset( $_GET['tab'] ) ? sanitize_text_field( wp_unslash( $_GET['tab'] ) ) : 'dashboard';
 
         ?>
         <div class="wrap woo-rs-product-sync-wrap">
@@ -490,7 +490,7 @@ class WOO_RS_Admin {
         <!-- Webhook API Key -->
         <div class="card woo-rs-card">
             <h2>Webhook API Key</h2>
-            <code class="woo-rs-api-key"><?php echo esc_html( $webhook_api_key ); ?></code>
+            <code class="woo-rs-api-key"><?php echo esc_html( self::mask_key( $webhook_api_key, 6 ) ); ?></code>
             <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline;">
                 <input type="hidden" name="action" value="woo_rs_product_sync_regenerate_key" />
                 <?php wp_nonce_field( 'woo_rs_product_sync_regenerate_key' ); ?>
@@ -792,11 +792,11 @@ class WOO_RS_Admin {
      * Helpers
      * ─────────────────────────────────────────────────── */
 
-    private static function mask_key( $key ) {
+    private static function mask_key( $key, $visible = 4 ) {
         if ( empty( $key ) ) {
             return '';
         }
-        return str_repeat( '*', max( 0, strlen( $key ) - 4 ) ) . substr( $key, -4 );
+        return str_repeat( '*', max( 0, strlen( $key ) - $visible ) ) . substr( $key, -$visible );
     }
 
     private static function pretty_json( $raw ) {
