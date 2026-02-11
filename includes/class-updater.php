@@ -186,9 +186,13 @@ class WOO_RS_Updater {
      * @return object|false  Release object or false on failure.
      */
     private static function fetch_latest_release() {
-        $cached = get_transient( self::CACHE_KEY );
-        if ( false !== $cached ) {
-            return $cached;
+        // Bypass cache when WordPress is doing a forced update check.
+        $force = isset( $_GET['force-check'] ) || ( defined( 'DOING_CRON' ) && DOING_CRON );
+        if ( ! $force ) {
+            $cached = get_transient( self::CACHE_KEY );
+            if ( false !== $cached ) {
+                return $cached;
+            }
         }
 
         $url = 'https://api.github.com/repos/' . self::GITHUB_REPO . '/releases/latest';
