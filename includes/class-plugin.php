@@ -20,6 +20,7 @@ class WOO_RS_Plugin {
         WOO_RS_Admin::init();
         WOO_RS_Category_Map::init();
         WOO_RS_Cron::init();
+        WOO_RS_Updater::init();
     }
 
     /**
