@@ -359,12 +359,8 @@ class WOO_RS_Admin {
         if ( ! empty( $_GET['saved'] ) ) {
             echo '<div class="notice notice-success is-dismissible"><p>Settings saved.</p></div>';
         }
-        if ( ! empty( $_GET['update_check'] ) ) {
-            if ( 'update_available' === $_GET['update_check'] ) {
-                echo '<div class="notice notice-warning is-dismissible"><p>A new version is available! Visit <a href="' . esc_url( admin_url( 'update-core.php' ) ) . '">Dashboard &rarr; Updates</a> to install it.</p></div>';
-            } else {
-                echo '<div class="notice notice-success is-dismissible"><p>You are running the latest version (v' . esc_html( WOO_RS_PRODUCT_SYNC_VERSION ) . ').</p></div>';
-            }
+        if ( isset( $_GET['update_check'] ) && 'update_available' === $_GET['update_check'] ) {
+            echo '<div class="notice notice-warning is-dismissible"><p>A new version of Woo RS Product Sync is available. <a href="' . esc_url( admin_url( 'update-core.php' ) ) . '">Update now</a></p></div>';
         }
     }
 
@@ -471,7 +467,15 @@ class WOO_RS_Admin {
         <!-- Check for Plugin Updates -->
         <div class="card woo-rs-card">
             <h2>Plugin Updates</h2>
-            <p>Current version: <strong>v<?php echo esc_html( WOO_RS_PRODUCT_SYNC_VERSION ); ?></strong></p>
+            <p>Current version: <strong>v<?php echo esc_html( WOO_RS_PRODUCT_SYNC_VERSION ); ?></strong>
+            <?php if ( isset( $_GET['update_check'] ) ) : ?>
+                <?php if ( 'update_available' === $_GET['update_check'] ) : ?>
+                    &mdash; <span style="color:#b32d2e;">Update available!</span> <a href="<?php echo esc_url( admin_url( 'update-core.php' ) ); ?>">Update now</a>
+                <?php else : ?>
+                    &mdash; <span style="color:#00a32a;">Up to date</span>
+                <?php endif; ?>
+            <?php endif; ?>
+            </p>
             <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline;">
                 <input type="hidden" name="action" value="woo_rs_product_sync_check_updates" />
                 <?php wp_nonce_field( 'woo_rs_product_sync_check_updates' ); ?>
