@@ -152,6 +152,12 @@ class WOO_RS_Product_Sync {
         // Store RS product ID as meta for fallback lookups
         update_post_meta( $product_id, '_rs_product_id', (string) $rs_product['id'] );
 
+        // Store the raw RS description so future syncs can detect real changes
+        // (the WC description may be rewritten by OpenAI and will no longer match).
+        if ( isset( $rs_product['description'] ) ) {
+            update_post_meta( $product_id, '_rs_description_raw', $rs_product['description'] );
+        }
+
         // Store all meta fields
         self::apply_meta( $product_id, $rs_product );
 
@@ -173,8 +179,29 @@ class WOO_RS_Product_Sync {
         $is_variation = $product->is_type( 'variation' );
         $changes      = array();
 
+        // Skip description if the RS source hasn't changed — this preserves
+        // OpenAI-rewritten descriptions in WooCommerce.
+        $rs_desc_changed = false;
+        if ( isset( $rs_product['description'] ) ) {
+            $stored_raw = get_post_meta( $wc_product_id, '_rs_description_raw', true );
+            if ( '' === $stored_raw && metadata_exists( 'post', $wc_product_id, '_rs_description_raw' ) === false ) {
+                // First sync after upgrade — backfill the raw meta, skip description update.
+                update_post_meta( $wc_product_id, '_rs_description_raw', $rs_product['description'] );
+                unset( $rs_product['description'] );
+            } elseif ( (string) $stored_raw === (string) $rs_product['description'] ) {
+                unset( $rs_product['description'] );
+            } else {
+                $rs_desc_changed = true;
+            }
+        }
+
         // Apply mapped fields and track changes
         $changes = self::apply_fields( $product, $rs_product, false );
+
+        // Store the new raw RS description when it actually changed.
+        if ( $rs_desc_changed ) {
+            update_post_meta( $wc_product_id, '_rs_description_raw', $rs_product['description'] );
+        }
 
         // manage_stock
         if ( isset( $rs_product['maintain_stock'] ) ) {
