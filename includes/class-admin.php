@@ -14,6 +14,16 @@ class WOO_RS_Admin {
         add_action( 'admin_post_woo_rs_product_sync_regenerate_key', array( __CLASS__, 'handle_regenerate_key' ) );
         add_action( 'admin_post_woo_rs_product_sync_save_settings', array( __CLASS__, 'handle_save_settings' ) );
         add_action( 'wp_ajax_woo_rs_test_openai', array( __CLASS__, 'ajax_test_openai' ) );
+        add_filter( 'plugin_action_links_' . plugin_basename( WOO_RS_PRODUCT_SYNC_FILE ), array( __CLASS__, 'action_links' ) );
+    }
+
+    /**
+     * Add Settings link on the Plugins page.
+     */
+    public static function action_links( $links ) {
+        $settings_link = '<a href="' . esc_url( admin_url( 'admin.php?page=woo-rs-product-sync' ) ) . '">Settings</a>';
+        array_unshift( $links, $settings_link );
+        return $links;
     }
 
     /**
