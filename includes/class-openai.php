@@ -168,8 +168,29 @@ class WOO_RS_OpenAI {
             return $result;
         }
 
-        if ( empty( $response_body['choices'][0]['message']['content'] ) ) {
-            $result = array( 'text' => null, 'error' => 'OpenAI returned an empty response.' );
+        // Extract output — try Chat Completions format, then Responses API format.
+        $output_text = '';
+        if ( ! empty( $response_body['choices'][0]['message']['content'] ) ) {
+            $output_text = trim( $response_body['choices'][0]['message']['content'] );
+        } elseif ( ! empty( $response_body['output'] ) ) {
+            foreach ( $response_body['output'] as $output_item ) {
+                if ( isset( $output_item['content'] ) ) {
+                    foreach ( $output_item['content'] as $content_block ) {
+                        if ( isset( $content_block['text'] ) ) {
+                            $output_text .= $content_block['text'];
+                        }
+                    }
+                }
+            }
+            $output_text = trim( $output_text );
+        }
+
+        if ( empty( $output_text ) ) {
+            $finish = isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : 'unknown';
+            $error_msg = 'length' === $finish
+                ? 'OpenAI used all tokens for reasoning with none left for output. Try a non-reasoning model like gpt-4.1.'
+                : 'OpenAI returned an empty response.';
+            $result = array( 'text' => null, 'error' => $error_msg );
             if ( $logging ) {
                 $result['log'] = array(
                     'request'  => $request_body,
@@ -179,7 +200,7 @@ class WOO_RS_OpenAI {
             return $result;
         }
 
-        $rewritten = trim( $response_body['choices'][0]['message']['content'] );
+        $rewritten = $output_text;
 
         $result = array( 'text' => $rewritten, 'error' => null );
         if ( $logging ) {

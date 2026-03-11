@@ -76,7 +76,8 @@ class WOO_RS_Webhook {
                 try {
                     WOO_RS_Product_Sync::sync_product( $rs_product, 'webhook' );
                 } catch ( \Exception $e ) {
-                    // Don't let sync errors block the 200 response to RS
+                    // Log the error but don't let it block the 200 response to RS.
+                    WOO_RS_Product_Sync::log_sync( $rs_product['id'], 0, 'error', 'webhook', array( 'exception' => $e->getMessage() ) );
                 }
             }
         }

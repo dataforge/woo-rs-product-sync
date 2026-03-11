@@ -213,12 +213,16 @@ class WOO_RS_Product_Sync {
             }
         }
 
-        // Status: only force draft when RS product is disabled (simple products only)
-        if ( ! $is_variation && ! empty( $rs_product['disabled'] ) ) {
+        // Status: draft when RS product is disabled, restore when re-enabled (simple products only)
+        if ( ! $is_variation && isset( $rs_product['disabled'] ) ) {
             $old_status = $product->get_status();
-            if ( 'draft' !== $old_status ) {
+            if ( ! empty( $rs_product['disabled'] ) && 'draft' !== $old_status ) {
                 $product->set_status( 'draft' );
                 $changes['status'] = array( 'old' => $old_status, 'new' => 'draft' );
+            } elseif ( empty( $rs_product['disabled'] ) && 'draft' === $old_status ) {
+                $default_status = get_option( 'woo_rs_product_sync_new_product_status', 'publish' );
+                $product->set_status( $default_status );
+                $changes['status'] = array( 'old' => 'draft', 'new' => $default_status );
             }
         }
 
@@ -320,8 +324,9 @@ class WOO_RS_Product_Sync {
 
             $new_value = $rs_product[ $rs_key ];
 
-            // Serialize arrays
+            // Normalize and serialize arrays to avoid false changes from key ordering.
             if ( is_array( $new_value ) ) {
+                ksort( $new_value );
                 $new_value = maybe_serialize( $new_value );
             }
 
@@ -350,8 +355,24 @@ class WOO_RS_Product_Sync {
             return;
         }
 
-        $wc_term_ids = array_map( 'intval', (array) $map[ $rs_category ] );
-        wp_set_object_terms( $product_id, $wc_term_ids, 'product_cat' );
+        $mapped_ids = array_map( 'intval', (array) $map[ $rs_category ] );
+
+        // Merge with existing WC categories to preserve any manually assigned ones.
+        $existing_ids = wp_get_object_terms( $product_id, 'product_cat', array( 'fields' => 'ids' ) );
+        if ( ! is_wp_error( $existing_ids ) && ! empty( $existing_ids ) ) {
+            // Remove previously-mapped IDs (from old RS category) so they get replaced.
+            $old_rs_cat  = get_post_meta( $product_id, '_rs_category', true );
+            $old_mapped  = array();
+            if ( ! empty( $old_rs_cat ) && isset( $map[ $old_rs_cat ] ) ) {
+                $old_mapped = array_map( 'intval', (array) $map[ $old_rs_cat ] );
+            }
+            $manual_ids = array_diff( $existing_ids, $old_mapped );
+            $merged_ids = array_unique( array_merge( $manual_ids, $mapped_ids ) );
+        } else {
+            $merged_ids = $mapped_ids;
+        }
+
+        wp_set_object_terms( $product_id, array_values( $merged_ids ), 'product_cat' );
     }
 
     /**

@@ -182,8 +182,8 @@ class WOO_RS_Category_Map {
 
         // Map this RS category to the new/existing WC category
         $map = self::get_map();
-        $existing_ids = isset( $map[ $rs_cat ] ) ? $map[ $rs_cat ] : array();
-        if ( ! in_array( $term_id, $existing_ids, true ) ) {
+        $existing_ids = array_map( 'intval', isset( $map[ $rs_cat ] ) ? $map[ $rs_cat ] : array() );
+        if ( ! in_array( (int) $term_id, $existing_ids, true ) ) {
             $existing_ids[] = $term_id;
         }
         $map[ $rs_cat ] = $existing_ids;
@@ -324,7 +324,7 @@ class WOO_RS_Category_Map {
         ?>
         <div class="card woo-rs-card">
             <h2>Category Mapping</h2>
-            <p>Map RepairShopr product categories to WooCommerce categories. Only products in mapped categories will be synced.</p>
+            <p>Map RepairShopr product categories to WooCommerce categories. Only products in mapped categories will be synced. Any categories you assign manually in WooCommerce will be preserved during sync.</p>
 
             <p>
                 <button type="button" class="button" id="woo-rs-refresh-categories">Refresh from RepairShopr API</button>

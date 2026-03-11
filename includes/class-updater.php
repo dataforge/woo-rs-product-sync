@@ -191,7 +191,7 @@ class WOO_RS_Updater {
         if ( ! $force ) {
             $cached = get_transient( self::CACHE_KEY );
             if ( false !== $cached ) {
-                return $cached;
+                return 'error' === $cached ? false : $cached;
             }
         }
 
@@ -207,13 +207,14 @@ class WOO_RS_Updater {
 
         if ( is_wp_error( $response ) || 200 !== wp_remote_retrieve_response_code( $response ) ) {
             // Cache the failure briefly so we don't hammer GitHub.
-            set_transient( self::CACHE_KEY, false, 5 * MINUTE_IN_SECONDS );
+            // Use 'error' string since get_transient() returns false for missing keys.
+            set_transient( self::CACHE_KEY, 'error', 5 * MINUTE_IN_SECONDS );
             return false;
         }
 
         $release = json_decode( wp_remote_retrieve_body( $response ) );
         if ( ! $release || empty( $release->tag_name ) ) {
-            set_transient( self::CACHE_KEY, false, 5 * MINUTE_IN_SECONDS );
+            set_transient( self::CACHE_KEY, 'error', 5 * MINUTE_IN_SECONDS );
             return false;
         }
 
