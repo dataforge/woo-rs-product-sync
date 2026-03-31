@@ -39,16 +39,7 @@ WordPress/WooCommerce plugin that syncs products from RepairShopr (RS) to WooCom
    git add -A && git commit -m "Release vX.Y.Z — description" && git push origin main
    ```
 
-3. **Build the release zip** (folder inside must be `woo-rs-product-sync/`):
-   ```bash
-   # From the plugin directory:
-   cd /tmp && rm -rf woo-rs-build && mkdir woo-rs-build
-   rsync -a --exclude='.git' --exclude='.claude' --exclude='_reference' --exclude='.gitignore' --exclude='CLAUDE.md' \
-     /path/to/woo-rs-product-sync/ woo-rs-build/woo-rs-product-sync/
-   cd woo-rs-build && zip -r woo-rs-product-sync-X.Y.Z.zip woo-rs-product-sync/
-   ```
-
-4. **Create the GitHub Release** with the zip attached:
+3. **Create the GitHub Release** with the zip attached:
    ```bash
    gh release create vX.Y.Z \
      --repo dataforge/woo-rs-product-sync \
