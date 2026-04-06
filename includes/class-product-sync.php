@@ -161,8 +161,8 @@ class WOO_RS_Product_Sync {
         // Store all meta fields
         self::apply_meta( $product_id, $rs_product );
 
-        // Assign WC categories from mapping
-        self::assign_wc_categories( $product_id, $rs_product );
+        // Assign WC categories from mapping (is_new=true skips merge to drop WC default category)
+        self::assign_wc_categories( $product_id, $rs_product, true );
 
         return $product_id;
     }
@@ -343,8 +343,13 @@ class WOO_RS_Product_Sync {
 
     /**
      * Assign WC categories to a product based on the category map.
+     *
+     * @param int   $product_id  WC product ID.
+     * @param array $rs_product  RS product data.
+     * @param bool  $is_new      True when called during product creation (skips merge to avoid
+     *                           keeping WooCommerce's auto-assigned default "Uncategorized" category).
      */
-    private static function assign_wc_categories( $product_id, $rs_product ) {
+    private static function assign_wc_categories( $product_id, $rs_product, $is_new = false ) {
         $rs_category = isset( $rs_product['product_category'] ) ? $rs_product['product_category'] : '';
         if ( empty( $rs_category ) ) {
             return;
@@ -357,19 +362,25 @@ class WOO_RS_Product_Sync {
 
         $mapped_ids = array_map( 'intval', (array) $map[ $rs_category ] );
 
-        // Merge with existing WC categories to preserve any manually assigned ones.
-        $existing_ids = wp_get_object_terms( $product_id, 'product_cat', array( 'fields' => 'ids' ) );
-        if ( ! is_wp_error( $existing_ids ) && ! empty( $existing_ids ) ) {
-            // Remove previously-mapped IDs (from old RS category) so they get replaced.
-            $old_rs_cat  = get_post_meta( $product_id, '_rs_category', true );
-            $old_mapped  = array();
-            if ( ! empty( $old_rs_cat ) && isset( $map[ $old_rs_cat ] ) ) {
-                $old_mapped = array_map( 'intval', (array) $map[ $old_rs_cat ] );
-            }
-            $manual_ids = array_diff( $existing_ids, $old_mapped );
-            $merged_ids = array_unique( array_merge( $manual_ids, $mapped_ids ) );
-        } else {
+        if ( $is_new ) {
+            // On create, WC auto-assigns the default "Uncategorized" category before this runs.
+            // Do not merge — just set the mapped IDs directly.
             $merged_ids = $mapped_ids;
+        } else {
+            // Merge with existing WC categories to preserve any manually assigned ones.
+            $existing_ids = wp_get_object_terms( $product_id, 'product_cat', array( 'fields' => 'ids' ) );
+            if ( ! is_wp_error( $existing_ids ) && ! empty( $existing_ids ) ) {
+                // Remove previously-mapped IDs (from old RS category) so they get replaced.
+                $old_rs_cat  = get_post_meta( $product_id, '_rs_category', true );
+                $old_mapped  = array();
+                if ( ! empty( $old_rs_cat ) && isset( $map[ $old_rs_cat ] ) ) {
+                    $old_mapped = array_map( 'intval', (array) $map[ $old_rs_cat ] );
+                }
+                $manual_ids = array_diff( $existing_ids, $old_mapped );
+                $merged_ids = array_unique( array_merge( $manual_ids, $mapped_ids ) );
+            } else {
+                $merged_ids = $mapped_ids;
+            }
         }
 
         wp_set_object_terms( $product_id, array_values( $merged_ids ), 'product_cat' );
