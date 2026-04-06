@@ -16,6 +16,7 @@ class WOO_RS_Plugin {
     }
 
     private function __construct() {
+        WOO_RS_OpenAI::migrate_models();
         WOO_RS_Webhook::init();
         WOO_RS_Admin::init();
         WOO_RS_Category_Map::init();

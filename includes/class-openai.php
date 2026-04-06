@@ -8,19 +8,57 @@ class WOO_RS_OpenAI {
 
     const DEFAULT_PROMPT = 'You are a product description writer for an e-commerce store. Rewrite the following product description to be clear, professional, and optimized for online sales. Keep it concise and highlight key features and benefits. Return only the rewritten description with no preamble or extra commentary.';
 
-    const DEFAULT_MODEL = 'gpt-5-nano';
+    const DEFAULT_MODEL = 'gpt-5.4-nano';
 
     /**
      * Per-model settings: reasoning models need higher token limits,
      * longer timeouts, and don't support temperature.
      */
     private static $model_config = array(
-        'gpt-5-nano' => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 60  ),
-        'gpt-5-mini' => array( 'reasoning' => false, 'max_tokens' => 4096,  'timeout' => 30  ),
-        'gpt-5'      => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 120 ),
-        'gpt-5.2'    => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 120 ),
-        'gpt-4.1'    => array( 'reasoning' => false, 'max_tokens' => 4096,  'timeout' => 30  ),
+        'gpt-5.4-nano' => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 60  ),
+        'gpt-5.4-mini' => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 90  ),
+        'gpt-5.4'      => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 120 ),
+        'gpt-5-pro'    => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 180 ),
     );
+
+    /**
+     * Aliases for retired/renamed models. Mapped to their closest current
+     * replacement. To add a future rename, append a row here and bump
+     * MIGRATION_VERSION below — migrate_models() will rewrite stored options
+     * for existing installs the next time the plugin loads.
+     */
+    private static $model_aliases = array(
+        'gpt-5-nano' => 'gpt-5.4-nano',
+        'gpt-5-mini' => 'gpt-5.4-mini',
+        'gpt-5'      => 'gpt-5.4',
+        'gpt-5.2'    => 'gpt-5.4',
+        'gpt-4.1'    => 'gpt-5.4-mini',
+    );
+
+    /**
+     * Bump whenever $model_aliases changes so migrate_models() runs once
+     * per install for the new mapping.
+     */
+    const MIGRATION_VERSION = 1;
+
+    /**
+     * One-shot migration: rewrite the stored model option if it points at a
+     * retired model. Safe to call on every request — short-circuits via the
+     * woo_rs_product_sync_openai_model_migration option.
+     */
+    public static function migrate_models() {
+        $done = (int) get_option( 'woo_rs_product_sync_openai_model_migration', 0 );
+        if ( $done >= self::MIGRATION_VERSION ) {
+            return;
+        }
+
+        $current = get_option( 'woo_rs_product_sync_openai_model', '' );
+        if ( $current && isset( self::$model_aliases[ $current ] ) ) {
+            update_option( 'woo_rs_product_sync_openai_model', self::$model_aliases[ $current ] );
+        }
+
+        update_option( 'woo_rs_product_sync_openai_model_migration', self::MIGRATION_VERSION, false );
+    }
 
     /**
      * Get config for a model, with sensible defaults for unknown models.
@@ -92,7 +130,15 @@ class WOO_RS_OpenAI {
      */
     public static function get_model() {
         $model = get_option( 'woo_rs_product_sync_openai_model', self::DEFAULT_MODEL );
-        return ! empty( $model ) ? $model : self::DEFAULT_MODEL;
+        if ( empty( $model ) ) {
+            return self::DEFAULT_MODEL;
+        }
+        // Resolve retired-model aliases at read time so calls work even before
+        // migrate_models() has run on this install.
+        if ( isset( self::$model_aliases[ $model ] ) ) {
+            return self::$model_aliases[ $model ];
+        }
+        return $model;
     }
 
     /**
@@ -155,6 +201,18 @@ class WOO_RS_OpenAI {
         $status_code   = wp_remote_retrieve_response_code( $response );
         $response_body = json_decode( wp_remote_retrieve_body( $response ), true );
 
+        if ( ! is_array( $response_body ) ) {
+            $result = array( 'text' => null, 'error' => 'OpenAI returned an unparseable response (HTTP ' . $status_code . ').' );
+            if ( $logging ) {
+                $result['log'] = array(
+                    'request'     => $request_body,
+                    'http_status' => $status_code,
+                    'response'    => wp_remote_retrieve_body( $response ),
+                );
+            }
+            return $result;
+        }
+
         if ( $status_code !== 200 ) {
             $error_msg = isset( $response_body['error']['message'] ) ? $response_body['error']['message'] : "HTTP {$status_code}";
             $result = array( 'text' => null, 'error' => $error_msg );
@@ -172,13 +230,14 @@ class WOO_RS_OpenAI {
         $output_text = '';
         if ( ! empty( $response_body['choices'][0]['message']['content'] ) ) {
             $output_text = trim( $response_body['choices'][0]['message']['content'] );
-        } elseif ( ! empty( $response_body['output'] ) ) {
+        } elseif ( ! empty( $response_body['output'] ) && is_array( $response_body['output'] ) ) {
             foreach ( $response_body['output'] as $output_item ) {
-                if ( isset( $output_item['content'] ) ) {
-                    foreach ( $output_item['content'] as $content_block ) {
-                        if ( isset( $content_block['text'] ) ) {
-                            $output_text .= $content_block['text'];
-                        }
+                if ( ! is_array( $output_item ) || ! isset( $output_item['content'] ) || ! is_array( $output_item['content'] ) ) {
+                    continue;
+                }
+                foreach ( $output_item['content'] as $content_block ) {
+                    if ( is_array( $content_block ) && isset( $content_block['text'] ) && is_string( $content_block['text'] ) ) {
+                        $output_text .= $content_block['text'];
                     }
                 }
             }
@@ -188,7 +247,7 @@ class WOO_RS_OpenAI {
         if ( empty( $output_text ) ) {
             $finish = isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : 'unknown';
             $error_msg = 'length' === $finish
-                ? 'OpenAI used all tokens for reasoning with none left for output. Try a non-reasoning model like gpt-4.1.'
+                ? 'OpenAI used all tokens for reasoning with none left for output. Try a smaller model like gpt-5.4-nano.'
                 : 'OpenAI returned an empty response.';
             $result = array( 'text' => null, 'error' => $error_msg );
             if ( $logging ) {

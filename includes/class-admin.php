@@ -285,7 +285,7 @@ class WOO_RS_Admin {
         if ( empty( $output_text ) ) {
             $finish = isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : 'unknown';
             if ( 'length' === $finish ) {
-                wp_send_json_error( 'OpenAI used all tokens for reasoning with none left for output. Try a non-reasoning model like gpt-4.1.' );
+                wp_send_json_error( 'OpenAI used all tokens for reasoning with none left for output. Try a smaller model like gpt-5.4-nano.' );
             }
             wp_send_json_error( 'OpenAI returned an empty response.' );
         }
@@ -643,11 +643,10 @@ class WOO_RS_Admin {
                         <th scope="row"><label for="openai_model">Model</label></th>
                         <td>
                             <select id="openai_model" name="openai_model">
-                                <option value="gpt-5-nano" <?php selected( $openai_model, 'gpt-5-nano' ); ?>>GPT-5 Nano (fastest, cheapest)</option>
-                                <option value="gpt-5-mini" <?php selected( $openai_model, 'gpt-5-mini' ); ?>>GPT-5 Mini (fast, cost-efficient)</option>
-                                <option value="gpt-5" <?php selected( $openai_model, 'gpt-5' ); ?>>GPT-5 (reasoning)</option>
-                                <option value="gpt-5.2" <?php selected( $openai_model, 'gpt-5.2' ); ?>>GPT-5.2 (best, coding/agentic)</option>
-                                <option value="gpt-4.1" <?php selected( $openai_model, 'gpt-4.1' ); ?>>GPT-4.1 (smartest non-reasoning)</option>
+                                <option value="gpt-5.4-nano" <?php selected( $openai_model, 'gpt-5.4-nano' ); ?>>GPT-5.4 Nano (fastest, cheapest)</option>
+                                <option value="gpt-5.4-mini" <?php selected( $openai_model, 'gpt-5.4-mini' ); ?>>GPT-5.4 Mini (fast, cost-efficient)</option>
+                                <option value="gpt-5.4" <?php selected( $openai_model, 'gpt-5.4' ); ?>>GPT-5.4 (flagship)</option>
+                                <option value="gpt-5-pro" <?php selected( $openai_model, 'gpt-5-pro' ); ?>>GPT-5 Pro (most capable)</option>
                             </select>
                         </td>
                     </tr>

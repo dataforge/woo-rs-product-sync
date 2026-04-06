@@ -61,6 +61,34 @@ class WOO_RS_Product_Sync {
             return array( 'action' => 'skipped', 'reason' => 'unmapped_category' );
         }
 
+        // Per-product lock to avoid races between concurrent webhook/cron writes
+        // (read-modify-write of _rs_category and product terms must be atomic).
+        $lock_key = 'woo_rs_sync_lock_' . (int) $rs_product['id'];
+        $acquired = false;
+        for ( $i = 0; $i < 20; $i++ ) {
+            if ( false === get_transient( $lock_key ) ) {
+                set_transient( $lock_key, 1, 30 );
+                $acquired = true;
+                break;
+            }
+            usleep( 250000 );
+        }
+        if ( ! $acquired ) {
+            self::log_sync( $rs_product['id'], 0, 'skipped', $source, array( 'reason' => 'lock_busy' ) );
+            return array( 'action' => 'skipped', 'reason' => 'lock_busy' );
+        }
+
+        try {
+            return self::sync_product_locked( $rs_product, $source );
+        } finally {
+            delete_transient( $lock_key );
+        }
+    }
+
+    /**
+     * Inner sync flow — runs while the per-product lock is held.
+     */
+    private static function sync_product_locked( $rs_product, $source ) {
         $wc_product_id = self::find_wc_product( $rs_product['id'] );
 
         if ( $wc_product_id ) {
@@ -253,7 +281,7 @@ class WOO_RS_Product_Sync {
         if ( ! $is_variation && isset( $rs_product['product_category'] ) ) {
             $old_rs_cat = get_post_meta( $wc_product_id, '_rs_category', true );
             if ( (string) $old_rs_cat !== (string) $rs_product['product_category'] ) {
-                self::assign_wc_categories( $wc_product_id, $rs_product );
+                self::assign_wc_categories( $wc_product_id, $rs_product, false, (string) $old_rs_cat );
             }
         }
 
@@ -349,7 +377,7 @@ class WOO_RS_Product_Sync {
      * @param bool  $is_new      True when called during product creation (skips merge to avoid
      *                           keeping WooCommerce's auto-assigned default "Uncategorized" category).
      */
-    private static function assign_wc_categories( $product_id, $rs_product, $is_new = false ) {
+    private static function assign_wc_categories( $product_id, $rs_product, $is_new = false, $prev_rs_category = null ) {
         $rs_category = isset( $rs_product['product_category'] ) ? $rs_product['product_category'] : '';
         if ( empty( $rs_category ) ) {
             return;
@@ -370,10 +398,18 @@ class WOO_RS_Product_Sync {
             // Merge with existing WC categories to preserve any manually assigned ones.
             $existing_ids = wp_get_object_terms( $product_id, 'product_cat', array( 'fields' => 'ids' ) );
             if ( ! is_wp_error( $existing_ids ) && ! empty( $existing_ids ) ) {
-                // Remove previously-mapped IDs (from old RS category) so they get replaced.
-                $old_rs_cat  = get_post_meta( $product_id, '_rs_category', true );
-                $old_mapped  = array();
-                if ( ! empty( $old_rs_cat ) && isset( $map[ $old_rs_cat ] ) ) {
+                // wp_get_object_terms can return string IDs depending on WP version;
+                // cast so array_diff against int $old_mapped works reliably.
+                $existing_ids = array_map( 'intval', $existing_ids );
+
+                // Caller passes the previous _rs_category so we don't re-read meta
+                // (which could already have been touched by a concurrent sync).
+                $old_rs_cat = ( null !== $prev_rs_category )
+                    ? $prev_rs_category
+                    : (string) get_post_meta( $product_id, '_rs_category', true );
+
+                $old_mapped = array();
+                if ( '' !== $old_rs_cat && isset( $map[ $old_rs_cat ] ) ) {
                     $old_mapped = array_map( 'intval', (array) $map[ $old_rs_cat ] );
                 }
                 $manual_ids = array_diff( $existing_ids, $old_mapped );
@@ -383,7 +419,7 @@ class WOO_RS_Product_Sync {
             }
         }
 
-        wp_set_object_terms( $product_id, array_values( $merged_ids ), 'product_cat' );
+        wp_set_object_terms( $product_id, array_values( array_map( 'intval', $merged_ids ) ), 'product_cat' );
     }
 
     /**
