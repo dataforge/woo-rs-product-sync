@@ -3,7 +3,7 @@
  * Plugin Name:       Woo RS Product Sync
  * Plugin URI:        https://github.com/dataforge/woo-rs-product-sync
  * Description:       Syncs products from RepairShopr to WooCommerce via webhooks and scheduled API polling.
- * Version:           0.3.5
+ * Version:           0.4.0
  * Author:            Dataforge
  * Author URI:        https://dataforge.us
  * License:           GPL-2.0-or-later
@@ -16,13 +16,16 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'WOO_RS_PRODUCT_SYNC_VERSION', '0.3.5' );
+define( 'WOO_RS_PRODUCT_SYNC_VERSION', '0.4.0' );
 define( 'WOO_RS_PRODUCT_SYNC_FILE', __FILE__ );
 define( 'WOO_RS_PRODUCT_SYNC_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WOO_RS_PRODUCT_SYNC_URL', plugin_dir_url( __FILE__ ) );
 define( 'WOO_RS_PRODUCT_SYNC_TABLE', 'woo_rs_webhook_log' );
 define( 'WOO_RS_SYNC_LOG_TABLE', 'woo_rs_product_sync_log' );
 
+require_once WOO_RS_PRODUCT_SYNC_DIR . 'includes/class-db.php';
+require_once WOO_RS_PRODUCT_SYNC_DIR . 'includes/class-request.php';
+require_once WOO_RS_PRODUCT_SYNC_DIR . 'includes/class-locks.php';
 require_once WOO_RS_PRODUCT_SYNC_DIR . 'includes/class-logger.php';
 require_once WOO_RS_PRODUCT_SYNC_DIR . 'includes/class-encryption.php';
 require_once WOO_RS_PRODUCT_SYNC_DIR . 'includes/class-api-client.php';

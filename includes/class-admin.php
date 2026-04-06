@@ -13,6 +13,7 @@ class WOO_RS_Admin {
         add_action( 'admin_post_woo_rs_product_sync_clear_sync_logs', array( __CLASS__, 'handle_clear_sync_logs' ) );
         add_action( 'admin_post_woo_rs_product_sync_regenerate_key', array( __CLASS__, 'handle_regenerate_key' ) );
         add_action( 'admin_post_woo_rs_product_sync_save_settings', array( __CLASS__, 'handle_save_settings' ) );
+        add_action( 'admin_notices', array( __CLASS__, 'maybe_render_encryption_notice' ) );
         add_action( 'wp_ajax_woo_rs_test_openai', array( __CLASS__, 'ajax_test_openai' ) );
         add_filter( 'plugin_action_links_' . plugin_basename( WOO_RS_PRODUCT_SYNC_FILE ), array( __CLASS__, 'action_links' ) );
     }
@@ -115,8 +116,53 @@ class WOO_RS_Admin {
 
         update_option( 'woo_rs_product_sync_api_key', wp_generate_password( 32, false ) );
 
+        // Stash a one-shot transient so the next page render can warn the
+        // admin that the existing RepairShopr webhook URL is now stale and
+        // must be updated on the RS side.
+        set_transient( 'woo_rs_product_sync_key_rotated', 1, 60 );
+
         wp_safe_redirect( add_query_arg( array( 'tab' => 'settings', 'key_regenerated' => '1' ), admin_url( 'admin.php?page=woo-rs-product-sync' ) ) );
         exit;
+    }
+
+    /**
+     * Render an admin notice if the encryption secret is missing. Without it,
+     * we refuse to write API keys to the database.
+     */
+    public static function maybe_render_encryption_notice() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+        if ( ! WOO_RS_Encryption::is_available() ) {
+            echo '<div class="notice notice-error"><p><strong>Woo RS Product Sync:</strong> '
+                . esc_html__( 'Encryption is unavailable — define REPAIRSHOPR_SYNC_SECRET (or AUTH_KEY) in wp-config.php. API keys cannot be saved until this is fixed.', 'woo-rs-product-sync' )
+                . '</p></div>';
+        }
+        if ( get_transient( 'woo_rs_product_sync_key_rotated' ) ) {
+            delete_transient( 'woo_rs_product_sync_key_rotated' );
+            $api_key = get_option( 'woo_rs_product_sync_api_key', '' );
+            $url     = rest_url( 'woo-rs-product-sync/v1/webhook' ) . '?key=' . rawurlencode( $api_key );
+            echo '<div class="notice notice-warning is-dismissible"><p><strong>Woo RS Product Sync:</strong> '
+                . esc_html__( 'Webhook API key was regenerated. Update the RepairShopr webhook URL to:', 'woo-rs-product-sync' )
+                . '</p><p><code>' . esc_html( $url ) . '</code></p></div>';
+        }
+    }
+
+    /**
+     * Encrypt a submitted secret and store it under $option. Returns true on
+     * success, false if encryption is unavailable (caller should surface a
+     * notice). Empty submissions are a no-op success.
+     */
+    private static function store_encrypted_option( $option, $plaintext ) {
+        if ( '' === (string) $plaintext ) {
+            return true;
+        }
+        $encrypted = WOO_RS_Encryption::encrypt( $plaintext );
+        if ( is_wp_error( $encrypted ) ) {
+            return false;
+        }
+        update_option( $option, $encrypted );
+        return true;
     }
 
     public static function handle_save_settings() {
@@ -124,6 +170,8 @@ class WOO_RS_Admin {
             wp_die( 'Unauthorized' );
         }
         check_admin_referer( 'woo_rs_product_sync_save_settings' );
+
+        $encryption_failed = false;
 
         // RS API Key — encrypted storage
         if ( isset( $_POST['rs_api_key'] ) ) {
@@ -134,15 +182,25 @@ class WOO_RS_Admin {
             // Only update if the submitted value is not the masked version
             $masked = self::mask_key( $stored_decrypted );
             if ( $submitted_key !== $masked && ! empty( $submitted_key ) ) {
-                $encrypted = WOO_RS_Encryption::encrypt( $submitted_key );
-                update_option( 'woo_rs_product_sync_rs_api_key', $encrypted );
+                if ( ! self::store_encrypted_option( 'woo_rs_product_sync_rs_api_key', $submitted_key ) ) {
+                    $encryption_failed = true;
+                }
             }
         }
 
-        // RS API URL
+        // RS API URL — must be a valid https URL with a host. Reject silently
+        // bad input by surfacing a notice on redirect.
+        $url_invalid = false;
         if ( isset( $_POST['rs_api_url'] ) ) {
-            $url = trim( esc_url_raw( wp_unslash( $_POST['rs_api_url'] ) ) );
-            update_option( 'woo_rs_product_sync_rs_api_url', $url );
+            $url   = WOO_RS_Request::post_url( 'rs_api_url' );
+            $valid = WOO_RS_Request::valid_http_url( $url, true );
+            if ( '' === $url ) {
+                update_option( 'woo_rs_product_sync_rs_api_url', '' );
+            } elseif ( '' !== $valid ) {
+                update_option( 'woo_rs_product_sync_rs_api_url', $valid );
+            } else {
+                $url_invalid = true;
+            }
         }
 
         // Auto-sync toggle
@@ -184,8 +242,9 @@ class WOO_RS_Admin {
 
             $masked_openai = self::mask_key( $stored_openai_decrypted );
             if ( $submitted_openai_key !== $masked_openai && ! empty( $submitted_openai_key ) ) {
-                $encrypted_openai = WOO_RS_Encryption::encrypt( $submitted_openai_key );
-                update_option( 'woo_rs_product_sync_openai_api_key', $encrypted_openai );
+                if ( ! self::store_encrypted_option( 'woo_rs_product_sync_openai_api_key', $submitted_openai_key ) ) {
+                    $encryption_failed = true;
+                }
             }
         }
 
@@ -197,15 +256,32 @@ class WOO_RS_Admin {
         $openai_logging = isset( $_POST['openai_logging'] ) ? 1 : 0;
         update_option( 'woo_rs_product_sync_openai_logging', $openai_logging );
 
+        // OpenAI prompt — cap at 8000 chars (~2k tokens) to avoid blowing the
+        // model context window. Anything longer is almost certainly a mistake.
+        $prompt_truncated = false;
         if ( isset( $_POST['openai_prompt'] ) ) {
-            $prompt = sanitize_textarea_field( wp_unslash( $_POST['openai_prompt'] ) );
+            $prompt = WOO_RS_Request::post_textarea( 'openai_prompt' );
+            if ( strlen( $prompt ) > 8000 ) {
+                $prompt           = substr( $prompt, 0, 8000 );
+                $prompt_truncated = true;
+            }
             update_option( 'woo_rs_product_sync_openai_prompt', $prompt );
         }
 
         // Reschedule cron in case interval or toggle changed
         WOO_RS_Cron::reschedule();
 
-        wp_safe_redirect( add_query_arg( array( 'tab' => 'settings', 'saved' => '1' ), admin_url( 'admin.php?page=woo-rs-product-sync' ) ) );
+        $args = array( 'tab' => 'settings', 'saved' => '1' );
+        if ( $encryption_failed ) {
+            $args['encryption_error'] = '1';
+        }
+        if ( $url_invalid ) {
+            $args['url_invalid'] = '1';
+        }
+        if ( $prompt_truncated ) {
+            $args['prompt_truncated'] = '1';
+        }
+        wp_safe_redirect( add_query_arg( $args, admin_url( 'admin.php?page=woo-rs-product-sync' ) ) );
         exit;
     }
 

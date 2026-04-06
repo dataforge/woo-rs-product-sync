@@ -6,6 +6,15 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class WOO_RS_Webhook {
 
+    /** Option storing the (encrypted) HMAC shared secret. Empty = HMAC verification disabled. */
+    const OPTION_HMAC_SECRET = 'woo_rs_product_sync_webhook_hmac_secret';
+
+    /** Option storing a CSV of allowed source IPs. Empty = no IP allowlisting. */
+    const OPTION_IP_ALLOWLIST = 'woo_rs_product_sync_webhook_ip_allowlist';
+
+    /** Header name carrying the HMAC. Format: "sha256=<hex>". */
+    const SIGNATURE_HEADER = 'x_rs_signature';
+
     public static function init() {
         add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
     }
@@ -19,35 +28,47 @@ class WOO_RS_Webhook {
     }
 
     /**
-     * Validate the API key if one is configured.
+     * Authenticate an inbound webhook. Layered checks (all enforced if configured):
+     *   1. API key (always required) — query param `key` matched in constant time.
+     *   2. IP allowlist (optional)   — REMOTE_ADDR must be in CSV list.
+     *   3. HMAC signature (optional) — header X-RS-Signature: sha256=<hex(hmac_sha256(secret, body))>.
      */
     public static function check_auth( WP_REST_Request $request ) {
+        // 1. API key.
         $stored_key = get_option( 'woo_rs_product_sync_api_key' );
-
         if ( empty( $stored_key ) ) {
-            return new WP_Error(
-                'rest_forbidden',
-                'Webhook API key not configured.',
-                array( 'status' => 403 )
-            );
+            return new WP_Error( 'rest_forbidden', 'Webhook API key not configured.', array( 'status' => 403 ) );
+        }
+        $provided_key = (string) $request->get_param( 'key' );
+        if ( '' === $provided_key || ! hash_equals( $stored_key, $provided_key ) ) {
+            return new WP_Error( 'rest_forbidden', 'Invalid or missing API key.', array( 'status' => 403 ) );
         }
 
-        $provided_key = $request->get_param( 'key' );
-
-        if ( empty( $provided_key ) ) {
-            return new WP_Error(
-                'rest_forbidden',
-                'Missing API key.',
-                array( 'status' => 403 )
-            );
+        // 2. IP allowlist (optional).
+        $allowlist_raw = (string) get_option( self::OPTION_IP_ALLOWLIST, '' );
+        if ( '' !== trim( $allowlist_raw ) ) {
+            $client_ip = self::client_ip();
+            if ( ! self::ip_allowed( $client_ip, $allowlist_raw ) ) {
+                return new WP_Error( 'rest_forbidden', 'Source IP not allowed.', array( 'status' => 403 ) );
+            }
         }
 
-        if ( ! hash_equals( $stored_key, $provided_key ) ) {
-            return new WP_Error(
-                'rest_forbidden',
-                'Invalid API key.',
-                array( 'status' => 403 )
-            );
+        // 3. HMAC signature (optional).
+        $secret_encrypted = (string) get_option( self::OPTION_HMAC_SECRET, '' );
+        if ( '' !== $secret_encrypted ) {
+            $secret = WOO_RS_Encryption::decrypt( $secret_encrypted );
+            if ( '' === $secret ) {
+                return new WP_Error( 'rest_forbidden', 'Webhook HMAC misconfigured.', array( 'status' => 500 ) );
+            }
+            $sig_header = (string) $request->get_header( self::SIGNATURE_HEADER );
+            if ( '' === $sig_header || 0 !== strpos( $sig_header, 'sha256=' ) ) {
+                return new WP_Error( 'rest_forbidden', 'Missing webhook signature.', array( 'status' => 403 ) );
+            }
+            $provided = substr( $sig_header, 7 );
+            $expected = hash_hmac( 'sha256', $request->get_body(), $secret );
+            if ( ! hash_equals( $expected, $provided ) ) {
+                return new WP_Error( 'rest_forbidden', 'Invalid webhook signature.', array( 'status' => 403 ) );
+            }
         }
 
         return true;
@@ -59,25 +80,25 @@ class WOO_RS_Webhook {
     public static function handle( WP_REST_Request $request ) {
         $headers = $request->get_headers();
         $body    = $request->get_body();
-        $method  = $_SERVER['REQUEST_METHOD'] ?? 'POST';
-        $ip      = $_SERVER['REMOTE_ADDR'] ?? '';
+        $method  = isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : 'POST';
+        $ip      = self::client_ip();
 
-        // Always log the raw webhook
+        // Logger scrubs sensitive headers (Authorization etc.) before persisting.
         WOO_RS_Logger::log( $method, $headers, $body, $ip );
 
-        // Attempt to sync the product
         $data = json_decode( $body, true );
 
-        if ( $data ) {
-            // RS webhooks wrap product data under "attributes"
-            $rs_product = isset( $data['attributes'] ) ? $data['attributes'] : $data;
+        if ( is_array( $data ) ) {
+            // RS webhooks wrap product data under "attributes".
+            $rs_product = isset( $data['attributes'] ) && is_array( $data['attributes'] ) ? $data['attributes'] : $data;
 
             if ( ! empty( $rs_product['id'] ) ) {
                 try {
                     WOO_RS_Product_Sync::sync_product( $rs_product, 'webhook' );
-                } catch ( \Exception $e ) {
-                    // Log the error but don't let it block the 200 response to RS.
-                    WOO_RS_Product_Sync::log_sync( $rs_product['id'], 0, 'error', 'webhook', array( 'exception' => $e->getMessage() ) );
+                } catch ( \WC_Data_Exception $e ) {
+                    WOO_RS_Product_Sync::log_sync( (int) $rs_product['id'], 0, 'error', 'webhook', array( 'exception' => $e->getMessage() ) );
+                } catch ( \RuntimeException $e ) {
+                    WOO_RS_Product_Sync::log_sync( (int) $rs_product['id'], 0, 'error', 'webhook', array( 'exception' => $e->getMessage() ) );
                 }
             }
         }
@@ -86,5 +107,36 @@ class WOO_RS_Webhook {
             'success' => true,
             'message' => 'Webhook received.',
         ), 200 );
+    }
+
+    /**
+     * Best-effort client IP from REMOTE_ADDR. We do not honor X-Forwarded-For
+     * by default — that header is trivially spoofable unless your stack
+     * normalizes it. Admins fronting WP behind a trusted proxy should configure
+     * the proxy to set REMOTE_ADDR.
+     */
+    private static function client_ip() {
+        if ( empty( $_SERVER['REMOTE_ADDR'] ) ) {
+            return '';
+        }
+        $ip = sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) );
+        return ( false !== filter_var( $ip, FILTER_VALIDATE_IP ) ) ? $ip : '';
+    }
+
+    /**
+     * @param string $ip       Validated client IP.
+     * @param string $csv_list Allowlist CSV (IPs only — CIDR not yet supported).
+     */
+    private static function ip_allowed( $ip, $csv_list ) {
+        if ( '' === $ip ) {
+            return false;
+        }
+        $entries = array_filter( array_map( 'trim', explode( ',', $csv_list ) ) );
+        foreach ( $entries as $entry ) {
+            if ( hash_equals( $entry, $ip ) ) {
+                return true;
+            }
+        }
+        return false;
     }
 }

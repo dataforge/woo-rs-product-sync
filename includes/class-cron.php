@@ -73,13 +73,24 @@ class WOO_RS_Cron {
             return;
         }
 
-        $stats    = array( 'created' => 0, 'updated' => 0, 'skipped' => 0 );
-        $page     = 1;
-        $per_page = 100;
+        $stats     = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 );
+        $page      = 1;
+        $per_page  = 100;
+        $max_pages = WOO_RS_API_Client::MAX_PAGES;
+        $last_error = '';
 
         do {
             $products = WOO_RS_API_Client::fetch_products_page( $page, $per_page );
+
             if ( is_wp_error( $products ) ) {
+                $last_error = $products->get_error_code() . ': ' . $products->get_error_message();
+                if ( 'rs_rate_limited' === $products->get_error_code() ) {
+                    // Reschedule a one-shot retry after the cool-down rather than blocking.
+                    $retry_after = (int) ( $products->get_error_data()['retry_after'] ?? 300 );
+                    if ( ! wp_next_scheduled( self::HOOK ) ) {
+                        wp_schedule_single_event( time() + $retry_after, self::HOOK );
+                    }
+                }
                 break;
             }
 
@@ -91,11 +102,12 @@ class WOO_RS_Cron {
             }
 
             $page++;
-        } while ( count( $products ) >= $per_page );
+        } while ( count( $products ) >= $per_page && $page <= $max_pages );
 
         update_option( 'woo_rs_product_sync_last_cron_run', array(
             'time'  => current_time( 'mysql', true ),
             'stats' => $stats,
+            'error' => $last_error,
         ) );
     }
 
@@ -109,13 +121,20 @@ class WOO_RS_Cron {
 
         check_ajax_referer( 'woo_rs_product_sync_nonce', 'nonce' );
 
-        $page      = isset( $_POST['page'] ) ? (int) $_POST['page'] : 1;
-        $per_page  = isset( $_POST['per_page'] ) ? (int) $_POST['per_page'] : 50;
+        $page     = isset( $_POST['page'] ) ? max( 1, (int) $_POST['page'] ) : 1;
+        $per_page = isset( $_POST['per_page'] ) ? (int) $_POST['per_page'] : 50;
+        // Clamp to a sane window: callers can't request 99,999 in one shot.
+        $per_page = max( 1, min( 100, $per_page ) );
+        $page     = min( $page, WOO_RS_API_Client::MAX_PAGES );
 
         $products = WOO_RS_API_Client::fetch_products_page( $page, $per_page );
 
         if ( is_wp_error( $products ) ) {
-            wp_send_json_error( $products->get_error_message() );
+            wp_send_json_error( array(
+                'code'    => $products->get_error_code(),
+                'message' => $products->get_error_message(),
+                'data'    => $products->get_error_data(),
+            ) );
         }
 
         $stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0 );

@@ -16,12 +16,43 @@ class WOO_RS_Plugin {
     }
 
     private function __construct() {
+        // Idempotent schema upgrades for tables added/modified after activation.
+        WOO_RS_Locks::ensure_table();
+        self::maybe_upgrade_db();
+
         WOO_RS_OpenAI::migrate_models();
         WOO_RS_Webhook::init();
         WOO_RS_Admin::init();
         WOO_RS_Category_Map::init();
         WOO_RS_Cron::init();
         WOO_RS_Updater::init();
+
+        add_action( 'admin_notices', array( __CLASS__, 'maybe_render_dependency_notices' ) );
+    }
+
+    /**
+     * Surface critical configuration problems to admins:
+     *   - WooCommerce missing/inactive (we can't sync without it).
+     *   - RS API key or URL not yet configured (cron will silently no-op).
+     */
+    public static function maybe_render_dependency_notices() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+        if ( ! class_exists( 'WooCommerce' ) ) {
+            echo '<div class="notice notice-error"><p><strong>Woo RS Product Sync:</strong> '
+                . esc_html__( 'WooCommerce is not active. This plugin cannot sync products until WooCommerce is installed and activated.', 'woo-rs-product-sync' )
+                . '</p></div>';
+            return;
+        }
+        $api_key = get_option( 'woo_rs_product_sync_rs_api_key', '' );
+        $api_url = get_option( 'woo_rs_product_sync_rs_api_url', '' );
+        if ( empty( $api_key ) || empty( $api_url ) ) {
+            $url = esc_url( admin_url( 'admin.php?page=woo-rs-product-sync' ) );
+            echo '<div class="notice notice-warning"><p><strong>Woo RS Product Sync:</strong> '
+                . esc_html__( 'RepairShopr API URL or key is not configured — sync is paused.', 'woo-rs-product-sync' )
+                . ' <a href="' . $url . '">' . esc_html__( 'Configure now', 'woo-rs-product-sync' ) . '</a>.</p></div>';
+        }
     }
 
     /**
@@ -30,6 +61,7 @@ class WOO_RS_Plugin {
     public static function activate() {
         self::create_table();
         self::create_sync_log_table();
+        WOO_RS_Locks::ensure_table();
         self::migrate_old_data();
 
         if ( ! get_option( 'woo_rs_product_sync_api_key' ) ) {
@@ -87,6 +119,8 @@ class WOO_RS_Plugin {
             action VARCHAR(20),
             source VARCHAR(20),
             changes LONGTEXT,
+            error_code VARCHAR(64) DEFAULT NULL,
+            error_message TEXT DEFAULT NULL,
             INDEX idx_synced_at (synced_at),
             INDEX idx_rs_product_id (rs_product_id)
         ) {$charset};";
@@ -95,6 +129,20 @@ class WOO_RS_Plugin {
         dbDelta( $sql );
 
         update_option( 'woo_rs_product_sync_db_version', WOO_RS_PRODUCT_SYNC_VERSION );
+    }
+
+    /**
+     * Re-run dbDelta if the stored version doesn't match the plugin version.
+     * dbDelta is idempotent and will ALTER existing tables to add new columns
+     * (e.g. error_code/error_message added in 0.4.0).
+     */
+    private static function maybe_upgrade_db() {
+        $installed = get_option( 'woo_rs_product_sync_db_version', '' );
+        if ( $installed === WOO_RS_PRODUCT_SYNC_VERSION ) {
+            return;
+        }
+        self::create_table();
+        self::create_sync_log_table();
     }
 
     /**

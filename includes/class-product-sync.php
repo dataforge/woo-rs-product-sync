@@ -51,6 +51,9 @@ class WOO_RS_Product_Sync {
      * @return array Sync result with action and changes.
      */
     public static function sync_product( $rs_product, $source = 'webhook' ) {
+        if ( ! class_exists( 'WooCommerce' ) || ! function_exists( 'wc_get_product' ) ) {
+            return array( 'action' => 'skipped', 'reason' => 'woocommerce_inactive' );
+        }
         if ( empty( $rs_product['id'] ) ) {
             return array( 'action' => 'skipped', 'reason' => 'no_id' );
         }
@@ -61,19 +64,12 @@ class WOO_RS_Product_Sync {
             return array( 'action' => 'skipped', 'reason' => 'unmapped_category' );
         }
 
-        // Per-product lock to avoid races between concurrent webhook/cron writes
-        // (read-modify-write of _rs_category and product terms must be atomic).
-        $lock_key = 'woo_rs_sync_lock_' . (int) $rs_product['id'];
-        $acquired = false;
-        for ( $i = 0; $i < 20; $i++ ) {
-            if ( false === get_transient( $lock_key ) ) {
-                set_transient( $lock_key, 1, 30 );
-                $acquired = true;
-                break;
-            }
-            usleep( 250000 );
-        }
-        if ( ! $acquired ) {
+        // Per-product lock to serialize concurrent webhook/cron writes. The
+        // read-modify-write of _rs_category and product terms must be atomic;
+        // see WOO_RS_Locks for the underlying mechanism.
+        $lock_key = 'product_' . (int) $rs_product['id'];
+        $token    = WOO_RS_Locks::acquire_blocking( $lock_key, WOO_RS_Locks::DEFAULT_TTL );
+        if ( false === $token ) {
             self::log_sync( $rs_product['id'], 0, 'skipped', $source, array( 'reason' => 'lock_busy' ) );
             return array( 'action' => 'skipped', 'reason' => 'lock_busy' );
         }
@@ -81,7 +77,7 @@ class WOO_RS_Product_Sync {
         try {
             return self::sync_product_locked( $rs_product, $source );
         } finally {
-            delete_transient( $lock_key );
+            WOO_RS_Locks::release( $lock_key, $token );
         }
     }
 
@@ -94,6 +90,14 @@ class WOO_RS_Product_Sync {
         if ( $wc_product_id ) {
             $changes = self::update_product( $wc_product_id, $rs_product );
 
+            if ( is_wp_error( $changes ) ) {
+                self::log_sync(
+                    $rs_product['id'], $wc_product_id, 'error', $source, array(),
+                    $changes->get_error_code(), $changes->get_error_message()
+                );
+                return array( 'action' => 'error', 'wc_product_id' => $wc_product_id, 'error' => $changes );
+            }
+
             // OpenAI description rewrite if description changed
             if ( isset( $changes['description'] ) ) {
                 self::maybe_openai_rewrite( $wc_product_id, $rs_product );
@@ -104,7 +108,14 @@ class WOO_RS_Product_Sync {
             return array( 'action' => $action, 'wc_product_id' => $wc_product_id, 'changes' => $changes );
         }
 
-        $new_id  = self::create_product( $rs_product );
+        $new_id = self::create_product( $rs_product );
+        if ( is_wp_error( $new_id ) ) {
+            self::log_sync(
+                $rs_product['id'], 0, 'error', $source, array(),
+                $new_id->get_error_code(), $new_id->get_error_message()
+            );
+            return array( 'action' => 'error', 'wc_product_id' => 0, 'error' => $new_id );
+        }
         $changes = array( 'created' => true );
 
         // OpenAI description rewrite for new products
@@ -175,7 +186,14 @@ class WOO_RS_Product_Sync {
             $product->set_tax_status( $rs_product['taxable'] ? 'taxable' : 'none' );
         }
 
-        $product_id = $product->save();
+        try {
+            $product_id = $product->save();
+        } catch ( \Exception $e ) {
+            return new WP_Error( 'wc_save_failed', $e->getMessage() );
+        }
+        if ( ! $product_id ) {
+            return new WP_Error( 'wc_save_failed', 'WC_Product::save() returned 0 on create.' );
+        }
 
         // Store RS product ID as meta for fallback lookups
         update_post_meta( $product_id, '_rs_product_id', (string) $rs_product['id'] );
@@ -241,16 +259,23 @@ class WOO_RS_Product_Sync {
             }
         }
 
-        // Status: draft when RS product is disabled, restore when re-enabled (simple products only)
+        // Status: draft when RS product is disabled, restore when re-enabled.
+        // We snapshot the prior status into _rs_prior_status before flipping to
+        // 'draft' so re-enabling restores whatever the admin had set (e.g.
+        // 'pending'), not a hard-coded default. Simple products only.
         if ( ! $is_variation && isset( $rs_product['disabled'] ) ) {
             $old_status = $product->get_status();
             if ( ! empty( $rs_product['disabled'] ) && 'draft' !== $old_status ) {
+                update_post_meta( $wc_product_id, '_rs_prior_status', $old_status );
                 $product->set_status( 'draft' );
                 $changes['status'] = array( 'old' => $old_status, 'new' => 'draft' );
             } elseif ( empty( $rs_product['disabled'] ) && 'draft' === $old_status ) {
+                $prior          = (string) get_post_meta( $wc_product_id, '_rs_prior_status', true );
                 $default_status = get_option( 'woo_rs_product_sync_new_product_status', 'publish' );
-                $product->set_status( $default_status );
-                $changes['status'] = array( 'old' => 'draft', 'new' => $default_status );
+                $restore_to     = ( '' !== $prior ) ? $prior : $default_status;
+                $product->set_status( $restore_to );
+                delete_post_meta( $wc_product_id, '_rs_prior_status' );
+                $changes['status'] = array( 'old' => 'draft', 'new' => $restore_to );
             }
         }
 
@@ -265,7 +290,14 @@ class WOO_RS_Product_Sync {
         }
 
         if ( ! empty( $changes ) ) {
-            $product->save();
+            try {
+                $saved_id = $product->save();
+            } catch ( \Exception $e ) {
+                return new WP_Error( 'wc_save_failed', $e->getMessage() );
+            }
+            if ( ! $saved_id ) {
+                return new WP_Error( 'wc_save_failed', 'WC_Product::save() returned 0 on update.' );
+            }
 
             // Reload to verify persistence
             $reloaded = wc_get_product( $wc_product_id );
@@ -319,6 +351,16 @@ class WOO_RS_Product_Sync {
                 continue;
             }
 
+            // Variation descriptions: gated by an explicit setting (default on,
+            // matching pre-0.4.0 behavior). Admins who inherit descriptions from
+            // the parent product can turn this off in settings.
+            if ( 'description' === $rs_key && $is_variation ) {
+                $sync_var_desc = (int) get_option( 'woo_rs_product_sync_sync_variation_descriptions', 1 );
+                if ( ! $sync_var_desc ) {
+                    continue;
+                }
+            }
+
             $new_value = $rs_product[ $rs_key ];
 
             if ( $is_create ) {
@@ -352,10 +394,11 @@ class WOO_RS_Product_Sync {
 
             $new_value = $rs_product[ $rs_key ];
 
-            // Normalize and serialize arrays to avoid false changes from key ordering.
+            // Normalize arrays to a deterministic JSON string so change detection
+            // is stable across PHP versions / serializer differences. (maybe_serialize
+            // could vary on nested objects.)
             if ( is_array( $new_value ) ) {
-                ksort( $new_value );
-                $new_value = maybe_serialize( $new_value );
+                $new_value = self::stable_json( $new_value );
             }
 
             $old_value = get_post_meta( $product_id, $meta_key, true );
@@ -423,6 +466,26 @@ class WOO_RS_Product_Sync {
     }
 
     /**
+     * Recursively ksort arrays and emit canonical JSON. Two payloads with the
+     * same logical content always produce the same string.
+     *
+     * @param mixed $value
+     * @return string
+     */
+    private static function stable_json( $value ) {
+        if ( is_array( $value ) ) {
+            // Recurse first so nested arrays normalize too.
+            foreach ( $value as $k => $v ) {
+                if ( is_array( $v ) ) {
+                    $value[ $k ] = json_decode( self::stable_json( $v ), true );
+                }
+            }
+            ksort( $value );
+        }
+        return (string) wp_json_encode( $value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+    }
+
+    /**
      * Type-safe comparison of old and new values.
      */
     private static function values_differ( $old, $new, $rs_key ) {
@@ -468,19 +531,36 @@ class WOO_RS_Product_Sync {
     /**
      * Log a sync action to the sync log table.
      */
-    public static function log_sync( $rs_product_id, $wc_product_id, $action, $source, $changes = array() ) {
+    /**
+     * Insert a row into the sync log.
+     *
+     * Errors are surfaced as first-class columns (error_code, error_message)
+     * so the admin log viewer can highlight failures without parsing JSON.
+     * Always logged regardless of logging_level when $action === 'error'.
+     *
+     * @param int    $rs_product_id
+     * @param int    $wc_product_id
+     * @param string $action  One of: created, updated, skipped, error.
+     * @param string $source  One of: webhook, cron, manual, openai.
+     * @param array  $changes
+     * @param string $error_code
+     * @param string $error_message
+     */
+    public static function log_sync( $rs_product_id, $wc_product_id, $action, $source, $changes = array(), $error_code = '', $error_message = '' ) {
         $logging_level = get_option( 'woo_rs_product_sync_logging_level', 'changes_only' );
 
-        if ( 'none' === $logging_level ) {
-            return;
-        }
-
-        if ( 'changes_only' === $logging_level && 'skipped' === $action ) {
-            return;
+        // Errors always log; user-set log level does not silence them.
+        if ( 'error' !== $action ) {
+            if ( 'none' === $logging_level ) {
+                return;
+            }
+            if ( 'changes_only' === $logging_level && 'skipped' === $action ) {
+                return;
+            }
         }
 
         global $wpdb;
-        $table = $wpdb->prefix . WOO_RS_SYNC_LOG_TABLE;
+        $table = WOO_RS_DB::table( 'sync_log' );
 
         $wpdb->insert(
             $table,
@@ -491,8 +571,10 @@ class WOO_RS_Product_Sync {
                 'action'        => sanitize_text_field( $action ),
                 'source'        => sanitize_text_field( $source ),
                 'changes'       => wp_json_encode( $changes ),
+                'error_code'    => '' === $error_code ? null : substr( sanitize_text_field( $error_code ), 0, 64 ),
+                'error_message' => '' === $error_message ? null : (string) $error_message,
             ),
-            array( '%s', '%d', '%d', '%s', '%s', '%s' )
+            array( '%s', '%d', '%d', '%s', '%s', '%s', '%s', '%s' )
         );
     }
 
@@ -514,20 +596,14 @@ class WOO_RS_Product_Sync {
      * Count sync log entries.
      */
     public static function count_sync_logs() {
-        global $wpdb;
-        $table = $wpdb->prefix . WOO_RS_SYNC_LOG_TABLE;
-
-        return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
+        return WOO_RS_DB::count_rows( 'sync_log' );
     }
 
     /**
      * Clear sync log entries.
      */
     public static function clear_sync_logs() {
-        global $wpdb;
-        $table = $wpdb->prefix . WOO_RS_SYNC_LOG_TABLE;
-
-        $wpdb->query( "TRUNCATE TABLE {$table}" );
+        WOO_RS_DB::truncate( 'sync_log' );
     }
 
     /**
@@ -535,9 +611,9 @@ class WOO_RS_Product_Sync {
      */
     public static function get_sync_stats() {
         global $wpdb;
-        $table = $wpdb->prefix . WOO_RS_SYNC_LOG_TABLE;
+        $table = WOO_RS_DB::table( 'sync_log' );
 
-        $last_sync = $wpdb->get_var( "SELECT synced_at FROM {$table} ORDER BY synced_at DESC LIMIT 1" );
+        $last_sync = WOO_RS_DB::latest_value( 'sync_log', 'synced_at' );
 
         $today = gmdate( 'Y-m-d 00:00:00' );
         $today_stats = $wpdb->get_row( $wpdb->prepare(

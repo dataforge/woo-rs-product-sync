@@ -25,6 +25,13 @@ class WOO_RS_API_Client {
         return rtrim( $url, '/' );
     }
 
+    /**
+     * Local in-process rate limiter. If the per-interval budget would be
+     * exceeded, returns a WP_Error indicating how long to wait — callers
+     * (cron, AJAX) reschedule rather than blocking the PHP worker.
+     *
+     * @return true|WP_Error
+     */
     private static function rate_limit() {
         if ( null === self::$batch_start ) {
             self::$batch_start = microtime( true );
@@ -35,16 +42,19 @@ class WOO_RS_API_Client {
         if ( $elapsed > self::INTERVAL_SECONDS ) {
             self::$api_call_count = 0;
             self::$batch_start    = microtime( true );
+            return true;
         }
 
         if ( self::$api_call_count >= self::MAX_CALLS_PER_INTERVAL ) {
-            $wait = self::INTERVAL_SECONDS - $elapsed;
-            if ( $wait > 0 ) {
-                usleep( (int) ( $wait * 1000000 ) );
-            }
-            self::$api_call_count = 0;
-            self::$batch_start    = microtime( true );
+            $wait = max( 1, (int) ceil( self::INTERVAL_SECONDS - $elapsed ) );
+            return new WP_Error(
+                'rs_rate_limited',
+                'Local rate limit reached.',
+                array( 'retry_after' => $wait )
+            );
         }
+
+        return true;
     }
 
     public static function get( $endpoint, $params = array() ) {
@@ -58,7 +68,10 @@ class WOO_RS_API_Client {
             return new WP_Error( 'no_api_url', 'RepairShopr API URL not configured.' );
         }
 
-        self::rate_limit();
+        $rl = self::rate_limit();
+        if ( is_wp_error( $rl ) ) {
+            return $rl;
+        }
 
         $url = $base_url . '/' . ltrim( $endpoint, '/' );
         if ( ! empty( $params ) ) {
@@ -83,11 +96,20 @@ class WOO_RS_API_Client {
         $body = wp_remote_retrieve_body( $response );
         $data = json_decode( $body, true );
 
-        if ( isset( $data['error'] ) && false !== strpos( $body, 'high number of requests' ) ) {
-            usleep( self::INTERVAL_SECONDS * 1000000 );
-            self::$api_call_count = 0;
-            self::$batch_start    = microtime( true );
-            return new WP_Error( 'rate_limited', 'RepairShopr API rate limit hit.' );
+        // RS signals rate-limiting either via HTTP 429 or a 200 body containing
+        // "high number of requests". Either way: surface as WP_Error with a
+        // retry_after hint and let the caller reschedule. Never block the worker.
+        $rate_limited = ( 429 === (int) $code )
+            || ( isset( $data['error'] ) && false !== strpos( $body, 'high number of requests' ) );
+        if ( $rate_limited ) {
+            // Drain our local counter so the next attempt doesn't immediately
+            // retrip the in-process limiter.
+            self::$api_call_count = self::MAX_CALLS_PER_INTERVAL;
+            return new WP_Error(
+                'rs_rate_limited',
+                'RepairShopr API rate limit hit.',
+                array( 'retry_after' => self::INTERVAL_SECONDS )
+            );
         }
 
         if ( $code < 200 || $code >= 300 ) {
@@ -108,6 +130,9 @@ class WOO_RS_API_Client {
         return new WP_Error( 'not_found', 'Product not found in RepairShopr.' );
     }
 
+    /** Hard cap on pagination to defend against runaway loops. */
+    const MAX_PAGES = 200;
+
     public static function fetch_all_products( $per_page = 100 ) {
         $all_products = array();
         $page         = 1;
@@ -122,10 +147,10 @@ class WOO_RS_API_Client {
                 return $result;
             }
 
-            $products = isset( $result['products'] ) ? $result['products'] : array();
+            $products     = isset( $result['products'] ) ? $result['products'] : array();
             $all_products = array_merge( $all_products, $products );
             $page++;
-        } while ( count( $products ) >= $per_page );
+        } while ( count( $products ) >= $per_page && $page <= self::MAX_PAGES );
 
         return $all_products;
     }

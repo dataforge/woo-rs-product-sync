@@ -57,10 +57,7 @@ class WOO_RS_Category_Map {
      * Extract RS categories from webhook log payloads.
      */
     private static function categories_from_webhook_log() {
-        global $wpdb;
-        $table = $wpdb->prefix . WOO_RS_PRODUCT_SYNC_TABLE;
-
-        $payloads = $wpdb->get_col( "SELECT payload FROM {$table} ORDER BY received_at DESC LIMIT 500" );
+        $payloads = WOO_RS_DB::recent_webhook_payloads( 200 );
         $categories = array();
 
         foreach ( $payloads as $payload ) {
@@ -85,9 +82,10 @@ class WOO_RS_Category_Map {
     private static function categories_from_product_meta() {
         global $wpdb;
 
-        $results = $wpdb->get_col(
-            "SELECT DISTINCT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_rs_category' AND meta_value != ''"
-        );
+        $results = $wpdb->get_col( $wpdb->prepare(
+            "SELECT DISTINCT meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value != ''",
+            '_rs_category'
+        ) );
 
         return $results ? $results : array();
     }
@@ -99,7 +97,11 @@ class WOO_RS_Category_Map {
     private static function categories_from_api() {
         $cached = get_transient( self::TRANSIENT_KEY );
         if ( false !== $cached ) {
-            return $cached;
+            if ( is_array( $cached ) ) {
+                return $cached;
+            }
+            // Corrupt cache value (not an array) — drop it and refetch.
+            delete_transient( self::TRANSIENT_KEY );
         }
 
         $api_key = WOO_RS_API_Client::get_api_key();
