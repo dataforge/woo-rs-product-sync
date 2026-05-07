@@ -130,8 +130,19 @@ class WOO_RS_API_Client {
         return new WP_Error( 'not_found', 'Product not found in RepairShopr.' );
     }
 
-    /** Hard cap on pagination to defend against runaway loops. */
-    const MAX_PAGES = 200;
+    /** Safety-net cap on pagination per query. Raised to accommodate large catalogs;
+     *  category-based sync makes hitting this essentially impossible in practice. */
+    const MAX_PAGES = 2000;
+
+    public static function fetch_all_categories() {
+        $result = self::get( 'products/categories' );
+        if ( is_wp_error( $result ) ) {
+            return $result;
+        }
+        return isset( $result['categories'] ) && is_array( $result['categories'] )
+            ? $result['categories']
+            : array();
+    }
 
     public static function fetch_all_products( $per_page = 100 ) {
         $all_products = array();
@@ -150,16 +161,18 @@ class WOO_RS_API_Client {
             $products     = isset( $result['products'] ) ? $result['products'] : array();
             $all_products = array_merge( $all_products, $products );
             $page++;
-        } while ( count( $products ) >= $per_page && $page <= self::MAX_PAGES );
+        } while ( ! empty( $products ) && $page <= self::MAX_PAGES );
 
         return $all_products;
     }
 
-    public static function fetch_products_page( $page = 1, $per_page = 100 ) {
-        $result = self::get( 'products', array(
-            'page'     => $page,
-            'per_page' => $per_page,
-        ) );
+    public static function fetch_products_page( $page = 1, $per_page = 0, $category_id = 0 ) {
+        // RS ignores per_page — omit it and let the API use its native page size.
+        $params = array( 'page' => $page );
+        if ( $category_id > 0 ) {
+            $params['category_id'] = $category_id;
+        }
+        $result = self::get( 'products', $params );
 
         if ( is_wp_error( $result ) ) {
             return $result;

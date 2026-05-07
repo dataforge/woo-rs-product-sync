@@ -64,6 +64,11 @@ class WOO_RS_Cron {
 
     /**
      * Cron callback: fetch all RS products and sync each one.
+     *
+     * Primary strategy: category-by-category — each query is bounded to one
+     * category so catalogs of any size are handled without hitting MAX_PAGES.
+     * Fallback: full paginated scan used when categories cannot be fetched
+     * (e.g. API error) or when the account has no categories configured.
      */
     public static function run_sync() {
         $api_key = WOO_RS_API_Client::get_api_key();
@@ -73,36 +78,69 @@ class WOO_RS_Cron {
             return;
         }
 
-        $stats     = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 );
-        $page      = 1;
-        $per_page  = 100;
-        $max_pages = WOO_RS_API_Client::MAX_PAGES;
+        $stats      = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 );
         $last_error = '';
 
-        do {
-            $products = WOO_RS_API_Client::fetch_products_page( $page, $per_page );
+        $categories = WOO_RS_API_Client::fetch_all_categories();
 
-            if ( is_wp_error( $products ) ) {
-                $last_error = $products->get_error_code() . ': ' . $products->get_error_message();
-                if ( 'rs_rate_limited' === $products->get_error_code() ) {
-                    // Reschedule a one-shot retry after the cool-down rather than blocking.
-                    $retry_after = (int) ( $products->get_error_data()['retry_after'] ?? 300 );
-                    if ( ! wp_next_scheduled( self::HOOK ) ) {
-                        wp_schedule_single_event( time() + $retry_after, self::HOOK );
+        if ( ! is_wp_error( $categories ) && ! empty( $categories ) ) {
+            foreach ( $categories as $category ) {
+                $cat_id = isset( $category['id'] ) ? (int) $category['id'] : 0;
+                if ( $cat_id <= 0 ) {
+                    continue;
+                }
+                $page = 1;
+                do {
+                    $products = WOO_RS_API_Client::fetch_products_page( $page, 0, $cat_id );
+                    if ( is_wp_error( $products ) ) {
+                        $last_error = $products->get_error_code() . ': ' . $products->get_error_message();
+                        if ( 'rs_rate_limited' === $products->get_error_code() ) {
+                            $retry_after = (int) ( $products->get_error_data()['retry_after'] ?? 300 );
+                            if ( ! wp_next_scheduled( self::HOOK ) ) {
+                                wp_schedule_single_event( time() + $retry_after, self::HOOK );
+                            }
+                            update_option( 'woo_rs_product_sync_last_cron_run', array(
+                                'time'  => current_time( 'mysql', true ),
+                                'stats' => $stats,
+                                'error' => $last_error,
+                            ) );
+                            return;
+                        }
+                        break; // non-rate-limit error: skip this category, continue with next
+                    }
+                    foreach ( $products as $rs_product ) {
+                        $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'cron' );
+                        if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
+                            $stats[ $result['action'] ]++;
+                        }
+                    }
+                    $page++;
+                } while ( ! empty( $products ) && $page <= WOO_RS_API_Client::MAX_PAGES );
+            }
+        } else {
+            // Fallback: full paginated scan when categories are unavailable.
+            $page = 1;
+            do {
+                $products = WOO_RS_API_Client::fetch_products_page( $page );
+                if ( is_wp_error( $products ) ) {
+                    $last_error = $products->get_error_code() . ': ' . $products->get_error_message();
+                    if ( 'rs_rate_limited' === $products->get_error_code() ) {
+                        $retry_after = (int) ( $products->get_error_data()['retry_after'] ?? 300 );
+                        if ( ! wp_next_scheduled( self::HOOK ) ) {
+                            wp_schedule_single_event( time() + $retry_after, self::HOOK );
+                        }
+                    }
+                    break;
+                }
+                foreach ( $products as $rs_product ) {
+                    $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'cron' );
+                    if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
+                        $stats[ $result['action'] ]++;
                     }
                 }
-                break;
-            }
-
-            foreach ( $products as $rs_product ) {
-                $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'cron' );
-                if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
-                    $stats[ $result['action'] ]++;
-                }
-            }
-
-            $page++;
-        } while ( count( $products ) >= $per_page && $page <= $max_pages );
+                $page++;
+            } while ( ! empty( $products ) && $page <= WOO_RS_API_Client::MAX_PAGES );
+        }
 
         update_option( 'woo_rs_product_sync_last_cron_run', array(
             'time'  => current_time( 'mysql', true ),
@@ -146,7 +184,9 @@ class WOO_RS_Cron {
             }
         }
 
-        $more = count( $products ) >= $per_page;
+        // RS ignores per_page; loop while the page was non-empty and we haven't
+        // hit the safety cap (prevents infinite loop if RS pages wrap around).
+        $more = ! empty( $products ) && $page < WOO_RS_API_Client::MAX_PAGES;
 
         wp_send_json_success( array(
             'processed' => count( $products ),
