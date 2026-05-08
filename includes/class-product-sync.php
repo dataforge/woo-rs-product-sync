@@ -279,14 +279,26 @@ class WOO_RS_Product_Sync {
             }
         }
 
-        // Tax status — skip variations: WC variations inherit tax_status from
-        // their parent variable product and ignore per-variation _tax_status meta.
-        if ( isset( $rs_product['taxable'] ) && ! $is_variation ) {
-            $old_tax = $product->get_tax_status();
+        // Tax status.
+        // Simple products: use WC's setter normally.
+        // Variations: WC variations ignore _tax_status meta and always return
+        // the parent's value. Store the RS value in _rs_tax_status instead, and
+        // a woocommerce_product_get_tax_status filter (registered in class-plugin.php)
+        // returns it so each variation can have its own effective tax status.
+        if ( isset( $rs_product['taxable'] ) ) {
             $new_tax = $rs_product['taxable'] ? 'taxable' : 'none';
-            if ( $old_tax !== $new_tax ) {
-                $product->set_tax_status( $new_tax );
-                $changes['tax_status'] = array( 'old' => $old_tax, 'new' => $new_tax );
+            if ( $is_variation ) {
+                $old_tax = get_post_meta( $wc_product_id, '_rs_tax_status', true ) ?: 'taxable';
+                if ( $old_tax !== $new_tax ) {
+                    update_post_meta( $wc_product_id, '_rs_tax_status', $new_tax );
+                    $changes['tax_status'] = array( 'old' => $old_tax, 'new' => $new_tax );
+                }
+            } else {
+                $old_tax = $product->get_tax_status();
+                if ( $old_tax !== $new_tax ) {
+                    $product->set_tax_status( $new_tax );
+                    $changes['tax_status'] = array( 'old' => $old_tax, 'new' => $new_tax );
+                }
             }
         }
 
