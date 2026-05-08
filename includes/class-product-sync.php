@@ -279,10 +279,8 @@ class WOO_RS_Product_Sync {
             }
         }
 
-        // Tax status — simple products only. WC variations inherit tax_status
-        // from their parent variable product; setting it per-variation is not
-        // supported by WooCommerce and is out of scope for this sync.
-        if ( isset( $rs_product['taxable'] ) && ! $is_variation ) {
+        // Tax status
+        if ( isset( $rs_product['taxable'] ) ) {
             $old_tax = $product->get_tax_status();
             $new_tax = $rs_product['taxable'] ? 'taxable' : 'none';
             if ( $old_tax !== $new_tax ) {
