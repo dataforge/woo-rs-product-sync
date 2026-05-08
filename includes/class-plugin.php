@@ -27,11 +27,6 @@ class WOO_RS_Plugin {
         WOO_RS_Cron::init();
         WOO_RS_Updater::init();
 
-        // Per-variation tax status: WC variations inherit tax_status from their
-        // parent and ignore _tax_status meta. We store our value in _rs_tax_status
-        // and override the getter here so each variation has its own effective status.
-        add_filter( 'woocommerce_product_get_tax_status', array( __CLASS__, 'filter_variation_tax_status' ), 10, 2 );
-
         add_action( 'admin_notices', array( __CLASS__, 'maybe_render_dependency_notices' ) );
     }
 
@@ -40,16 +35,6 @@ class WOO_RS_Plugin {
      *   - WooCommerce missing/inactive (we can't sync without it).
      *   - RS API key or URL not yet configured (cron will silently no-op).
      */
-    public static function filter_variation_tax_status( $status, $product ) {
-        if ( $product instanceof WC_Product && $product->is_type( 'variation' ) ) {
-            $rs_tax = get_post_meta( $product->get_id(), '_rs_tax_status', true );
-            if ( '' !== $rs_tax ) {
-                return $rs_tax;
-            }
-        }
-        return $status;
-    }
-
     public static function maybe_render_dependency_notices() {
         if ( ! current_user_can( 'manage_options' ) ) {
             return;
