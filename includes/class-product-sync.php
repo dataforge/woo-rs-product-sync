@@ -279,8 +279,9 @@ class WOO_RS_Product_Sync {
             }
         }
 
-        // Tax status
-        if ( isset( $rs_product['taxable'] ) ) {
+        // Tax status — skip variations: WC variations inherit tax_status from
+        // their parent variable product and ignore per-variation _tax_status meta.
+        if ( isset( $rs_product['taxable'] ) && ! $is_variation ) {
             $old_tax = $product->get_tax_status();
             $new_tax = $rs_product['taxable'] ? 'taxable' : 'none';
             if ( $old_tax !== $new_tax ) {
