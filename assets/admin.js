@@ -225,6 +225,23 @@ jQuery(document).ready(function ($) {
             },
             success: function (response) {
                 if (!response.success) {
+                    if (response.data && response.data.code === 'rs_rate_limited') {
+                        var rateLimitData = response.data.data || {};
+                        var retryAfter = Math.max(1, parseInt(rateLimitData.retry_after, 10) || 60);
+                        var minutes = Math.ceil(retryAfter / 60);
+                        syncInProgress = true;
+                        $('#woo-rs-start-sync').prop('disabled', true);
+                        $('#woo-rs-sync-status').text(
+                            'RepairShopr request limit reached. Sync will continue automatically in about ' +
+                            minutes + ' minute' + (minutes === 1 ? '' : 's') + '.'
+                        );
+                        setTimeout(function () {
+                            if (syncInProgress) {
+                                processBatch(page);
+                            }
+                        }, retryAfter * 1000);
+                        return;
+                    }
                     syncInProgress = false;
                     $('#woo-rs-start-sync').prop('disabled', false);
                     renderSyncError(response.data, 'Unknown error');
