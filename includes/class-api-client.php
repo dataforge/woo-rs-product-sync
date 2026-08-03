@@ -9,8 +9,8 @@ class WOO_RS_API_Client {
     const MAX_CALLS_PER_INTERVAL = 160;
     const INTERVAL_SECONDS       = 300;
 
-    private static $api_call_count = 0;
-    private static $batch_start    = null;
+    const RATE_STATE_OPTION = 'woo_rs_product_sync_rate_state';
+    const RATE_LOCK_KEY     = 'repairshopr_api_rate_limit';
 
     public static function get_api_key() {
         $encrypted = get_option( 'woo_rs_product_sync_rs_api_key', '' );
@@ -33,28 +33,59 @@ class WOO_RS_API_Client {
      * @return true|WP_Error
      */
     private static function rate_limit() {
-        if ( null === self::$batch_start ) {
-            self::$batch_start = microtime( true );
-        }
-
-        $elapsed = microtime( true ) - self::$batch_start;
-
-        if ( $elapsed > self::INTERVAL_SECONDS ) {
-            self::$api_call_count = 0;
-            self::$batch_start    = microtime( true );
-            return true;
-        }
-
-        if ( self::$api_call_count >= self::MAX_CALLS_PER_INTERVAL ) {
-            $wait = max( 1, (int) ceil( self::INTERVAL_SECONDS - $elapsed ) );
+        $token = WOO_RS_Locks::acquire_blocking( self::RATE_LOCK_KEY, 10 );
+        if ( false === $token ) {
             return new WP_Error(
                 'rs_rate_limited',
-                'Local rate limit reached.',
-                array( 'retry_after' => $wait )
+                'Rate limiter is busy; retry shortly.',
+                array( 'retry_after' => 1 )
             );
         }
 
-        return true;
+        try {
+            $now   = time();
+            $state = get_option( self::RATE_STATE_OPTION, array() );
+            $state = is_array( $state ) ? $state : array();
+            $start = isset( $state['start'] ) ? (int) $state['start'] : 0;
+            $count = isset( $state['count'] ) ? (int) $state['count'] : 0;
+
+            if ( $start <= 0 || ( $now - $start ) >= self::INTERVAL_SECONDS ) {
+                $start = $now;
+                $count = 0;
+            }
+
+            if ( $count >= self::MAX_CALLS_PER_INTERVAL ) {
+                return new WP_Error(
+                    'rs_rate_limited',
+                    'Local rate limit reached.',
+                    array( 'retry_after' => max( 1, self::INTERVAL_SECONDS - ( $now - $start ) ) )
+                );
+            }
+
+            update_option( self::RATE_STATE_OPTION, array(
+                'start' => $start,
+                'count' => $count + 1,
+            ), false );
+            return true;
+        } finally {
+            WOO_RS_Locks::release( self::RATE_LOCK_KEY, $token );
+        }
+    }
+
+    /** Prevent additional workers from retrying immediately after an API 429. */
+    private static function exhaust_rate_limit() {
+        $token = WOO_RS_Locks::acquire_blocking( self::RATE_LOCK_KEY, 10 );
+        if ( false === $token ) {
+            return;
+        }
+        try {
+            update_option( self::RATE_STATE_OPTION, array(
+                'start' => time(),
+                'count' => self::MAX_CALLS_PER_INTERVAL,
+            ), false );
+        } finally {
+            WOO_RS_Locks::release( self::RATE_LOCK_KEY, $token );
+        }
     }
 
     public static function get( $endpoint, $params = array() ) {
@@ -86,8 +117,6 @@ class WOO_RS_API_Client {
             'timeout' => 30,
         ) );
 
-        self::$api_call_count++;
-
         if ( is_wp_error( $response ) ) {
             return $response;
         }
@@ -102,9 +131,7 @@ class WOO_RS_API_Client {
         $rate_limited = ( 429 === (int) $code )
             || ( isset( $data['error'] ) && false !== strpos( $body, 'high number of requests' ) );
         if ( $rate_limited ) {
-            // Drain our local counter so the next attempt doesn't immediately
-            // retrip the in-process limiter.
-            self::$api_call_count = self::MAX_CALLS_PER_INTERVAL;
+            self::exhaust_rate_limit();
             return new WP_Error(
                 'rs_rate_limited',
                 'RepairShopr API rate limit hit.',

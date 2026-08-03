@@ -6,11 +6,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class WOO_RS_Cron {
 
-    const HOOK = 'woo_rs_product_sync_cron';
+    const HOOK                = 'woo_rs_product_sync_cron';
+    const CONTINUATION_HOOK   = 'woo_rs_product_sync_continue';
+    const CONTINUATION_OPTION = 'woo_rs_product_sync_continuation';
 
     public static function init() {
         add_filter( 'cron_schedules', array( __CLASS__, 'add_custom_interval' ) );
         add_action( self::HOOK, array( __CLASS__, 'run_sync' ) );
+        add_action( self::CONTINUATION_HOOK, array( __CLASS__, 'run_sync' ) );
         add_action( 'wp_ajax_woo_rs_run_manual_sync', array( __CLASS__, 'ajax_manual_sync_batch' ) );
     }
 
@@ -48,10 +51,9 @@ class WOO_RS_Cron {
      * Unschedule the cron event.
      */
     public static function unschedule() {
-        $timestamp = wp_next_scheduled( self::HOOK );
-        if ( $timestamp ) {
-            wp_unschedule_event( $timestamp, self::HOOK );
-        }
+        wp_clear_scheduled_hook( self::HOOK );
+        wp_clear_scheduled_hook( self::CONTINUATION_HOOK );
+        delete_option( self::CONTINUATION_OPTION );
     }
 
     /**
@@ -78,32 +80,51 @@ class WOO_RS_Cron {
             return;
         }
 
-        $stats      = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 );
-        $last_error = '';
+        $continuation = get_option( self::CONTINUATION_OPTION, array() );
+        $continuation = is_array( $continuation ) ? $continuation : array();
+        $stats        = isset( $continuation['stats'] ) && is_array( $continuation['stats'] )
+            ? array_merge( array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 ), $continuation['stats'] )
+            : array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 );
+        $last_error   = '';
 
-        $categories = WOO_RS_API_Client::fetch_all_categories();
+        if ( 'categories' === ( $continuation['mode'] ?? '' ) && ! empty( $continuation['categories'] ) && is_array( $continuation['categories'] ) ) {
+            $categories     = $continuation['categories'];
+            $category_index = max( 0, (int) ( $continuation['category_index'] ?? 0 ) );
+            $start_page     = max( 1, (int) ( $continuation['page'] ?? 1 ) );
+        } elseif ( 'fallback' === ( $continuation['mode'] ?? '' ) ) {
+            $categories     = array();
+            $category_index = 0;
+            $start_page     = max( 1, (int) ( $continuation['page'] ?? 1 ) );
+        } else {
+            $categories     = WOO_RS_API_Client::fetch_all_categories();
+            $category_index = 0;
+            $start_page     = 1;
+            if ( is_wp_error( $categories ) && 'rs_rate_limited' === $categories->get_error_code() ) {
+                self::schedule_continuation( array( 'stats' => $stats ), self::retry_after( $categories ) );
+                return;
+            }
+        }
 
         if ( ! is_wp_error( $categories ) && ! empty( $categories ) ) {
-            foreach ( $categories as $category ) {
-                $cat_id = isset( $category['id'] ) ? (int) $category['id'] : 0;
+            for ( $index = $category_index, $total = count( $categories ); $index < $total; $index++ ) {
+                $category = $categories[ $index ];
+                $cat_id   = isset( $category['id'] ) ? (int) $category['id'] : 0;
                 if ( $cat_id <= 0 ) {
                     continue;
                 }
-                $page = 1;
+                $page = ( $index === $category_index ) ? $start_page : 1;
                 do {
                     $products = WOO_RS_API_Client::fetch_products_page( $page, 0, $cat_id );
                     if ( is_wp_error( $products ) ) {
                         $last_error = $products->get_error_code() . ': ' . $products->get_error_message();
                         if ( 'rs_rate_limited' === $products->get_error_code() ) {
-                            $retry_after = (int) ( $products->get_error_data()['retry_after'] ?? 300 );
-                            if ( ! wp_next_scheduled( self::HOOK ) ) {
-                                wp_schedule_single_event( time() + $retry_after, self::HOOK );
-                            }
-                            update_option( 'woo_rs_product_sync_last_cron_run', array(
-                                'time'  => current_time( 'mysql', true ),
-                                'stats' => $stats,
-                                'error' => $last_error,
-                            ) );
+                            self::schedule_continuation( array(
+                                'mode'           => 'categories',
+                                'categories'     => $categories,
+                                'category_index' => $index,
+                                'page'           => $page,
+                                'stats'          => $stats,
+                            ), self::retry_after( $products ) );
                             return;
                         }
                         break; // non-rate-limit error: skip this category, continue with next
@@ -119,16 +140,18 @@ class WOO_RS_Cron {
             }
         } else {
             // Fallback: full paginated scan when categories are unavailable.
-            $page = 1;
+            $page = $start_page;
             do {
                 $products = WOO_RS_API_Client::fetch_products_page( $page );
                 if ( is_wp_error( $products ) ) {
                     $last_error = $products->get_error_code() . ': ' . $products->get_error_message();
                     if ( 'rs_rate_limited' === $products->get_error_code() ) {
-                        $retry_after = (int) ( $products->get_error_data()['retry_after'] ?? 300 );
-                        if ( ! wp_next_scheduled( self::HOOK ) ) {
-                            wp_schedule_single_event( time() + $retry_after, self::HOOK );
-                        }
+                        self::schedule_continuation( array(
+                            'mode'  => 'fallback',
+                            'page'  => $page,
+                            'stats' => $stats,
+                        ), self::retry_after( $products ) );
+                        return;
                     }
                     break;
                 }
@@ -147,6 +170,21 @@ class WOO_RS_Cron {
             'stats' => $stats,
             'error' => $last_error,
         ) );
+        delete_option( self::CONTINUATION_OPTION );
+    }
+
+    /** Persist a resumable cursor and schedule its dedicated one-shot event. */
+    private static function schedule_continuation( $state, $delay ) {
+        update_option( self::CONTINUATION_OPTION, $state, false );
+        if ( ! wp_next_scheduled( self::CONTINUATION_HOOK ) ) {
+            wp_schedule_single_event( time() + max( 1, (int) $delay ), self::CONTINUATION_HOOK );
+        }
+    }
+
+    /** Extract a conservative retry delay from a rate-limit error. */
+    private static function retry_after( $error ) {
+        $data = $error->get_error_data();
+        return max( 1, (int) ( is_array( $data ) && isset( $data['retry_after'] ) ? $data['retry_after'] : 300 ) );
     }
 
     /**
@@ -178,7 +216,17 @@ class WOO_RS_Cron {
         $stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0 );
 
         foreach ( $products as $rs_product ) {
-            $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'manual' );
+            try {
+                $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'manual' );
+            } catch ( \Throwable $e ) {
+                $rs_product_id = isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0;
+                WOO_RS_Product_Sync::log_sync( $rs_product_id, 0, 'error', 'manual', array(), 'sync_exception', $e->getMessage() );
+                wp_send_json_error( array(
+                    'code'       => 'sync_exception',
+                    'message'    => $e->getMessage(),
+                    'product_id' => $rs_product_id,
+                ) );
+            }
             if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
                 $stats[ $result['action'] ]++;
             }

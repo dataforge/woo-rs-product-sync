@@ -22,7 +22,6 @@ class WOO_RS_Updater {
         add_filter( 'upgrader_install_package_result', array( __CLASS__, 'fix_directory' ), 10, 2 );
         add_filter( 'plugins_api', array( __CLASS__, 'plugin_info' ), 10, 3 );
         add_action( 'admin_post_woo_rs_product_sync_check_updates', array( __CLASS__, 'handle_check_updates' ) );
-		add_filter( 'plugin_action_links_' . plugin_basename( WOO_RS_PRODUCT_SYNC_FILE ), array( __CLASS__, 'action_links' ) );
     }
 
     /**
@@ -184,16 +183,6 @@ class WOO_RS_Updater {
      * @param object $release  GitHub release object.
      * @return string
      */
-
-	public static function action_links( $links ) {
-		$url  = wp_nonce_url(
-			admin_url( 'admin-post.php?action=woo_rs_product_sync_check_updates' ),
-			'woo_rs_product_sync_check_updates'
-		);
-		$link = '<a href="' . esc_url( $url ) . '">Check for Updates</a>';
-		array_unshift( $links, $link );
-		return $links;
-	}
 
 	private static function get_asset_url( $release ) {
         if ( ! empty( $release->assets ) ) {

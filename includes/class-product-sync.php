@@ -137,14 +137,15 @@ class WOO_RS_Product_Sync {
     }
 
     /**
-     * Find a WC product by RS product ID.
-     * Checks SKU first (covers simple products and variations), then meta fallback.
+     * Find a WC product previously claimed by this plugin for an RS product ID.
+     * The SKU is only a candidate: matching it without verifying plugin-owned
+     * meta could overwrite an unrelated WooCommerce product with the same SKU.
      */
     public static function find_wc_product( $rs_product_id ) {
         $sku_string = (string) $rs_product_id;
 
         $product_id = wc_get_product_id_by_sku( $sku_string );
-        if ( $product_id ) {
+        if ( $product_id && (string) get_post_meta( $product_id, '_rs_product_id', true ) === $sku_string ) {
             return $product_id;
         }
 
@@ -166,6 +167,12 @@ class WOO_RS_Product_Sync {
 
         $product->set_sku( (string) $rs_product['id'] );
         self::apply_fields( $product, $rs_product, true );
+        // WooCommerce may otherwise pass null for post_excerpt when the source
+        // omits long_description. On strict MySQL schemas post_excerpt is
+        // NOT NULL, which causes wpdb to print HTML into the AJAX response.
+        if ( ! array_key_exists( 'long_description', $rs_product ) || null === $rs_product['long_description'] ) {
+            $product->set_short_description( '' );
+        }
 
         // Set manage_stock based on RS maintain_stock flag
         if ( isset( $rs_product['maintain_stock'] ) ) {
@@ -197,6 +204,11 @@ class WOO_RS_Product_Sync {
 
         // Store RS product ID as meta for fallback lookups
         update_post_meta( $product_id, '_rs_product_id', (string) $rs_product['id'] );
+        if ( ! empty( $rs_product['disabled'] ) ) {
+            // A newly-created product has no prior status to restore; re-enable
+            // it to the configured default, while still marking the draft as ours.
+            update_post_meta( $product_id, '_rs_disabled_by_sync', '1' );
+        }
 
         // Store the raw RS description so future syncs can detect real changes
         // (the WC description may be rewritten by OpenAI and will no longer match).
@@ -259,22 +271,29 @@ class WOO_RS_Product_Sync {
             }
         }
 
-        // Status: draft when RS product is disabled, restore when re-enabled.
-        // We snapshot the prior status into _rs_prior_status before flipping to
-        // 'draft' so re-enabling restores whatever the admin had set (e.g.
-        // 'pending'), not a hard-coded default. Simple products only.
+        // Status: draft when RS product is disabled, restore only a draft that
+        // this plugin previously set. This preserves an admin's manual draft.
+        $store_prior_status  = null;
+        $mark_disabled_by_rs = false;
+        $clear_disabled_mark = false;
         if ( ! $is_variation && isset( $rs_product['disabled'] ) ) {
             $old_status = $product->get_status();
             if ( ! empty( $rs_product['disabled'] ) && 'draft' !== $old_status ) {
-                update_post_meta( $wc_product_id, '_rs_prior_status', $old_status );
+                $store_prior_status  = $old_status;
+                $mark_disabled_by_rs = true;
                 $product->set_status( 'draft' );
                 $changes['status'] = array( 'old' => $old_status, 'new' => 'draft' );
-            } elseif ( empty( $rs_product['disabled'] ) && 'draft' === $old_status ) {
+            } elseif ( ! empty( $rs_product['disabled'] ) && 'draft' === $old_status && ! get_post_meta( $wc_product_id, '_rs_disabled_by_sync', true ) ) {
+                // It was already draft before RS disabled it; preserve that status
+                // when RS later re-enables the product.
+                $store_prior_status  = 'draft';
+                $mark_disabled_by_rs = true;
+            } elseif ( empty( $rs_product['disabled'] ) && 'draft' === $old_status && get_post_meta( $wc_product_id, '_rs_disabled_by_sync', true ) ) {
                 $prior          = (string) get_post_meta( $wc_product_id, '_rs_prior_status', true );
                 $default_status = get_option( 'woo_rs_product_sync_new_product_status', 'publish' );
                 $restore_to     = ( '' !== $prior ) ? $prior : $default_status;
                 $product->set_status( $restore_to );
-                delete_post_meta( $wc_product_id, '_rs_prior_status' );
+                $clear_disabled_mark = true;
                 $changes['status'] = array( 'old' => 'draft', 'new' => $restore_to );
             }
         }
@@ -305,6 +324,17 @@ class WOO_RS_Product_Sync {
                 $verified_qty = $reloaded->get_stock_quantity();
                 $changes['quantity']['verified'] = $verified_qty;
             }
+        }
+
+        if ( null !== $store_prior_status ) {
+            update_post_meta( $wc_product_id, '_rs_prior_status', $store_prior_status );
+        }
+        if ( $mark_disabled_by_rs ) {
+            update_post_meta( $wc_product_id, '_rs_disabled_by_sync', '1' );
+        }
+        if ( $clear_disabled_mark ) {
+            delete_post_meta( $wc_product_id, '_rs_prior_status' );
+            delete_post_meta( $wc_product_id, '_rs_disabled_by_sync' );
         }
 
         // Update WC categories only when the RS category changed (simple products only).

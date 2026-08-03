@@ -22,8 +22,11 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class WOO_RS_Locks {
 
-    /** Per-product lock TTL (seconds). */
-    const DEFAULT_TTL = 30;
+    /**
+     * Per-product lock TTL (seconds). This must exceed the longest optional
+     * OpenAI request, which runs while the product write lock is held.
+     */
+    const DEFAULT_TTL = 300;
 
     /** Max attempts a caller may use when waiting for a busy lock. */
     const MAX_ATTEMPTS = 20;
@@ -44,11 +47,12 @@ class WOO_RS_Locks {
         global $wpdb;
 
         $installed = (int) get_option( 'woo_rs_locks_db_version', 0 );
-        if ( $installed >= self::DB_VERSION ) {
+        $table     = $wpdb->prefix . self::TABLE;
+        $exists    = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+        if ( $installed >= self::DB_VERSION && $exists === $table ) {
             return;
         }
 
-        $table   = $wpdb->prefix . self::TABLE;
         $charset = $wpdb->get_charset_collate();
 
         $sql = "CREATE TABLE {$table} (
@@ -62,7 +66,12 @@ class WOO_RS_Locks {
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         dbDelta( $sql );
 
-        update_option( 'woo_rs_locks_db_version', self::DB_VERSION );
+        // Do not mark the migration complete if dbDelta failed to create the
+        // table (for example, due to a database-permission problem).
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+        if ( $exists === $table ) {
+            update_option( 'woo_rs_locks_db_version', self::DB_VERSION );
+        }
     }
 
     /**
