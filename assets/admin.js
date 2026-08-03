@@ -7,6 +7,8 @@ jQuery(document).ready(function ($) {
     var totalCreated   = 0;
     var totalUpdated   = 0;
     var totalSkipped   = 0;
+    var skippedConflictProductIds = {};
+    var currentSyncPage = 1;
 
     function errorMessage(data, fallback) {
         if (data && typeof data === 'object') {
@@ -102,7 +104,7 @@ jQuery(document).ready(function ($) {
 
         var $actions = $('<div>', { 'class': 'woo-rs-sync-conflict-actions' });
         var $match = $('<button>', { type: 'button', 'class': 'button button-primary', text: 'Match & Continue' });
-        var $notMatch = $('<button>', { type: 'button', 'class': 'button', text: 'Not a Match' });
+        var $notMatch = $('<button>', { type: 'button', 'class': 'button', text: 'Not a Match — Skip for Now' });
 
         $match.on('click', function () {
             $match.add($notMatch).prop('disabled', true);
@@ -120,8 +122,10 @@ jQuery(document).ready(function ($) {
                         renderSyncError(response.data, 'Unable to match these products.');
                         return;
                     }
-                    $status.text('Products matched. Restarting full sync...');
-                    $('#woo-rs-start-sync').prop('disabled', false).trigger('click');
+                    $status.text('Products matched. Continuing full sync...');
+                    syncInProgress = true;
+                    $('#woo-rs-start-sync').prop('disabled', true);
+                    processBatch(currentSyncPage);
                 },
                 error: function (xhr, status, error) {
                     var payload = xhr.responseJSON && xhr.responseJSON.data ? xhr.responseJSON.data : null;
@@ -131,22 +135,11 @@ jQuery(document).ready(function ($) {
         });
 
         $notMatch.on('click', function () {
-            $status.empty().append(document.createTextNode('Products were not linked. Change the WooCommerce product SKU, then run the sync again.'));
-            if (details.wc_edit_url || details.rs_product_url) {
-                var $links = $('<span class="woo-rs-sync-error-links"> â€” </span>');
-                var notMatchWooLink = productLink(details.wc_edit_url, 'Open WooCommerce product');
-                var notMatchRsLink = productLink(details.rs_product_url, 'Open RepairShopr product');
-                if (notMatchWooLink) {
-                    $links.append(notMatchWooLink);
-                }
-                if (notMatchWooLink && notMatchRsLink) {
-                    $links.append(document.createTextNode(' | '));
-                }
-                if (notMatchRsLink) {
-                    $links.append(notMatchRsLink);
-                }
-                $status.append($links);
-            }
+            skippedConflictProductIds[String(details.rs_product_id)] = true;
+            $status.text('This product was not linked and will be skipped for this sync. Continuing...');
+            syncInProgress = true;
+            $('#woo-rs-start-sync').prop('disabled', true);
+            processBatch(currentSyncPage);
         });
 
         $actions.append($match, $notMatch);
@@ -204,6 +197,7 @@ jQuery(document).ready(function ($) {
         totalCreated   = 0;
         totalUpdated   = 0;
         totalSkipped   = 0;
+        skippedConflictProductIds = {};
 
         $(this).prop('disabled', true);
         $('.woo-rs-progress-container').show();
@@ -214,6 +208,7 @@ jQuery(document).ready(function ($) {
     });
 
     function processBatch(page) {
+        currentSyncPage = page;
         $.ajax({
             url: woo_rs_sync.ajax_url,
             type: 'POST',
@@ -221,7 +216,8 @@ jQuery(document).ready(function ($) {
                 action:   'woo_rs_run_manual_sync',
                 nonce:    woo_rs_sync.nonce,
                 page:     page,
-                per_page: 50
+                per_page: 50,
+                skip_product_ids: Object.keys(skippedConflictProductIds)
             },
             success: function (response) {
                 if (!response.success) {

@@ -200,6 +200,9 @@ class WOO_RS_Cron {
 
         $page     = isset( $_POST['page'] ) ? max( 1, (int) $_POST['page'] ) : 1;
         $per_page = isset( $_POST['per_page'] ) ? (int) $_POST['per_page'] : 50;
+        $skip_product_ids = isset( $_POST['skip_product_ids'] ) && is_array( $_POST['skip_product_ids'] )
+            ? array_unique( array_filter( array_map( 'absint', wp_unslash( $_POST['skip_product_ids'] ) ) ) )
+            : array();
         // Clamp to a sane window: callers can't request 99,999 in one shot.
         $per_page = max( 1, min( 100, $per_page ) );
         $page     = min( $page, WOO_RS_API_Client::MAX_PAGES );
@@ -217,10 +220,14 @@ class WOO_RS_Cron {
         $stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0 );
 
         foreach ( $products as $rs_product ) {
+            $rs_product_id = isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0;
+            if ( $rs_product_id && in_array( $rs_product_id, $skip_product_ids, true ) ) {
+                $stats['skipped']++;
+                continue;
+            }
             try {
                 $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'manual' );
             } catch ( \Throwable $e ) {
-                $rs_product_id = isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0;
                 WOO_RS_Product_Sync::log_sync( $rs_product_id, 0, 'error', 'manual', array(), 'sync_exception', $e->getMessage() );
                 wp_send_json_error( array(
                     'code'       => 'sync_exception',
