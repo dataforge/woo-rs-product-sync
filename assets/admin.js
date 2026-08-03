@@ -147,6 +147,10 @@ jQuery(document).ready(function ($) {
             $('<p>', { text: 'A WooCommerce product already has the same SKU. Are these the same item?' }),
             $woo,
             $rs,
+            $('<p>', {
+                'class': 'woo-rs-sync-conflict-help',
+                text: 'Not a match? You can skip it for now. To fix it later, change the WooCommerce product SKU to that product’s correct, unique SKU. Do not change the RepairShopr product ID.'
+            }),
             $actions
         );
         $status.append($card);

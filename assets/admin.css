@@ -201,6 +201,11 @@
     margin: 0 0 12px;
 }
 
+.woo-rs-sync-conflict-help {
+    margin-top: 14px !important;
+    color: #50575e;
+}
+
 .woo-rs-sync-conflict-product {
     margin: 10px 0;
 }
