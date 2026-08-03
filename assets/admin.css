@@ -223,6 +223,14 @@
     margin-top: 3px;
 }
 
+.woo-rs-sync-duplicate-list {
+    margin: 6px 0 0 18px;
+}
+
+.woo-rs-sync-duplicate-list li {
+    margin: 8px 0;
+}
+
 .woo-rs-sync-conflict-actions {
     display: flex;
     gap: 8px;

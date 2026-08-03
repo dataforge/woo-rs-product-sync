@@ -85,6 +85,33 @@ class WOO_RS_Product_Sync {
      * Inner sync flow — runs while the per-product lock is held.
      */
     private static function sync_product_locked( $rs_product, $source ) {
+        $sku_product_ids = self::find_products_by_sku( $rs_product['id'] );
+        if ( count( $sku_product_ids ) > 1 ) {
+            $wc_products = array();
+            foreach ( $sku_product_ids as $product_id ) {
+                $product = wc_get_product( $product_id );
+                $wc_products[] = array(
+                    'id'       => $product_id,
+                    'name'     => $product ? $product->get_name() : __( 'Unknown product', 'woo-rs-product-sync' ),
+                    'sku'      => $product ? (string) $product->get_sku() : '',
+                    'edit_url' => get_edit_post_link( $product_id, 'raw' ),
+                );
+            }
+
+            $rs_name = ! empty( $rs_product['name'] ) ? (string) $rs_product['name'] : __( 'Unnamed RepairShopr product', 'woo-rs-product-sync' );
+            $error   = new WP_Error( 'rs_duplicate_wc_sku', sprintf(
+                __( 'The SKU "%s" is used by more than one WooCommerce product. Resolve the duplicates before syncing.', 'woo-rs-product-sync' ),
+                (string) $rs_product['id']
+            ), array(
+                'rs_product_id'  => (int) $rs_product['id'],
+                'rs_product_name' => $rs_name,
+                'rs_product_url' => self::repairshopr_product_url( $rs_product['id'] ),
+                'wc_products'    => $wc_products,
+            ) );
+            self::log_sync( $rs_product['id'], 0, 'error', $source, array(), $error->get_error_code(), $error->get_error_message() );
+            return array( 'action' => 'error', 'wc_product_id' => 0, 'error' => $error );
+        }
+
         $wc_product_id = self::find_wc_product( $rs_product['id'] );
 
         if ( $wc_product_id ) {
@@ -111,7 +138,7 @@ class WOO_RS_Product_Sync {
         // Do not attempt a create when an unrelated product already has this
         // SKU. WooCommerce would only return "Invalid or duplicated SKU",
         // which hides the product that needs an administrator's attention.
-        $conflict_id = self::find_sku_conflict( $rs_product['id'] );
+        $conflict_id = ! empty( $sku_product_ids ) ? (int) $sku_product_ids[0] : 0;
         if ( $conflict_id ) {
             $conflict_product = wc_get_product( $conflict_id );
             $conflict_name    = $conflict_product ? $conflict_product->get_name() : __( 'Unknown product', 'woo-rs-product-sync' );
@@ -181,14 +208,23 @@ class WOO_RS_Product_Sync {
         return $product_id ? (int) $product_id : 0;
     }
 
-    /** Return an unlinked product that blocks an RS product ID from becoming a SKU. */
-    private static function find_sku_conflict( $rs_product_id ) {
-        $sku_string = (string) $rs_product_id;
-        $product_id = wc_get_product_id_by_sku( $sku_string );
-        if ( $product_id && (string) get_post_meta( $product_id, '_rs_product_id', true ) !== $sku_string ) {
-            return (int) $product_id;
-        }
-        return 0;
+    /** Return every active WooCommerce product that uses a SKU. */
+    private static function find_products_by_sku( $sku ) {
+        global $wpdb;
+
+        $ids = $wpdb->get_col( $wpdb->prepare(
+            "SELECT DISTINCT posts.ID
+             FROM {$wpdb->posts} AS posts
+             INNER JOIN {$wpdb->postmeta} AS postmeta ON posts.ID = postmeta.post_id
+             WHERE postmeta.meta_key = '_sku'
+               AND postmeta.meta_value = %s
+               AND posts.post_type IN ('product', 'product_variation')
+               AND posts.post_status NOT IN ('trash', 'auto-draft')
+             ORDER BY posts.ID ASC",
+            (string) $sku
+        ) );
+
+        return array_map( 'intval', $ids );
     }
 
     /**

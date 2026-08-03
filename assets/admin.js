@@ -32,6 +32,11 @@ jQuery(document).ready(function ($) {
             return;
         }
 
+        if (data && data.code === 'rs_duplicate_wc_sku' && details && details.rs_product_id && details.wc_products) {
+            renderDuplicateSkuConflict(details);
+            return;
+        }
+
         $status.empty().append(document.createTextNode('Error: ' + errorMessage(data, fallback)));
 
         if (details && typeof details === 'object' && (details.wc_edit_url || details.rs_product_url)) {
@@ -150,6 +155,39 @@ jQuery(document).ready(function ($) {
             $woo,
             $rs,
             $actions
+        );
+        $status.append($card);
+    }
+
+    function renderDuplicateSkuConflict(details) {
+        var $status = $('#woo-rs-sync-status').empty();
+        var $card = $('<div>', { 'class': 'woo-rs-sync-conflict' });
+        var $rs = $('<div>', { 'class': 'woo-rs-sync-conflict-product' })
+            .append($('<span>', { 'class': 'woo-rs-sync-conflict-label', text: 'RepairShopr product' }))
+            .append($('<strong>', { text: details.rs_product_name || 'Unknown RepairShopr product' }))
+            .append($('<span>', { 'class': 'woo-rs-sync-conflict-id', text: ' — Product ID: ' + details.rs_product_id }));
+        var rsLink = productLink(details.rs_product_url, 'Open RepairShopr product');
+        if (rsLink) {
+            $rs.append($('<div>', { 'class': 'woo-rs-sync-conflict-link' }).append(rsLink));
+        }
+
+        var $list = $('<ul>', { 'class': 'woo-rs-sync-duplicate-list' });
+        $.each(details.wc_products, function (index, product) {
+            var $item = $('<li>')
+                .append($('<strong>', { text: product.name || 'Unknown WooCommerce product' }))
+                .append($('<span>', { 'class': 'woo-rs-sync-conflict-id', text: ' — SKU: ' + (product.sku || 'Unknown') }));
+            var productEditLink = productLink(product.edit_url, 'Open WooCommerce product #' + product.id);
+            if (productEditLink) {
+                $item.append($('<div>', { 'class': 'woo-rs-sync-conflict-link' }).append(productEditLink));
+            }
+            $list.append($item);
+        });
+
+        $card.append(
+            $('<p>', { text: 'More than one WooCommerce product uses this SKU. To prevent linking the wrong item, no match can be selected until the duplicates are resolved.' }),
+            $rs,
+            $('<span>', { 'class': 'woo-rs-sync-conflict-label', text: 'WooCommerce products using this SKU' }),
+            $list
         );
         $status.append($card);
     }
