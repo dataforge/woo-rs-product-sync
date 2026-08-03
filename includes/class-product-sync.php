@@ -108,6 +108,27 @@ class WOO_RS_Product_Sync {
             return array( 'action' => $action, 'wc_product_id' => $wc_product_id, 'changes' => $changes );
         }
 
+        // Do not attempt a create when an unrelated product already has this
+        // SKU. WooCommerce would only return "Invalid or duplicated SKU",
+        // which hides the product that needs an administrator's attention.
+        $conflict_id = self::find_sku_conflict( $rs_product['id'] );
+        if ( $conflict_id ) {
+            $conflict_product = wc_get_product( $conflict_id );
+            $conflict_name    = $conflict_product ? $conflict_product->get_name() : __( 'Unknown product', 'woo-rs-product-sync' );
+            $message = sprintf(
+                __( 'RepairShopr product %1$s cannot be synced because WooCommerce product #%2$d, "%3$s", already uses SKU "%1$s" but is not linked to RepairShopr. Sync stopped to avoid overwriting that product. If they are the same item, link product #%2$d by setting its _rs_product_id meta to %1$s; otherwise change the existing WooCommerce SKU and run sync again.', 'woo-rs-product-sync' ),
+                (string) $rs_product['id'],
+                $conflict_id,
+                $conflict_name
+            );
+            $error = new WP_Error( 'rs_sku_conflict', $message, array(
+                'rs_product_id' => (int) $rs_product['id'],
+                'wc_product_id' => $conflict_id,
+            ) );
+            self::log_sync( $rs_product['id'], $conflict_id, 'error', $source, array(), $error->get_error_code(), $error->get_error_message() );
+            return array( 'action' => 'error', 'wc_product_id' => $conflict_id, 'error' => $error );
+        }
+
         $new_id = self::create_product( $rs_product );
         if ( is_wp_error( $new_id ) ) {
             self::log_sync(
@@ -157,6 +178,16 @@ class WOO_RS_Product_Sync {
         ) );
 
         return $product_id ? (int) $product_id : 0;
+    }
+
+    /** Return an unlinked product that blocks an RS product ID from becoming a SKU. */
+    private static function find_sku_conflict( $rs_product_id ) {
+        $sku_string = (string) $rs_product_id;
+        $product_id = wc_get_product_id_by_sku( $sku_string );
+        if ( $product_id && (string) get_post_meta( $product_id, '_rs_product_id', true ) !== $sku_string ) {
+            return (int) $product_id;
+        }
+        return 0;
     }
 
     /**

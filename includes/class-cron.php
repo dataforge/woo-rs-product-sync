@@ -227,6 +227,16 @@ class WOO_RS_Cron {
                     'product_id' => $rs_product_id,
                 ) );
             }
+            if ( isset( $result['action'] ) && 'error' === $result['action'] ) {
+                $error = isset( $result['error'] ) && is_wp_error( $result['error'] ) ? $result['error'] : null;
+                wp_send_json_error( array(
+                    'code'          => $error ? $error->get_error_code() : 'sync_failed',
+                    'message'       => $error ? $error->get_error_message() : __( 'This product could not be synced.', 'woo-rs-product-sync' ),
+                    'data'          => $error ? $error->get_error_data() : array(),
+                    'rs_product_id' => isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0,
+                    'wc_product_id' => isset( $result['wc_product_id'] ) ? (int) $result['wc_product_id'] : 0,
+                ) );
+            }
             if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
                 $stats[ $result['action'] ]++;
             }
