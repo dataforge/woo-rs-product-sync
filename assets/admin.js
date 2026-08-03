@@ -23,6 +23,40 @@ jQuery(document).ready(function ($) {
         return data || fallback;
     }
 
+    function renderSyncError(data, fallback) {
+        var $status = $('#woo-rs-sync-status');
+        var details = data && data.data && typeof data.data === 'object' ? data.data : data;
+
+        $status.empty().append(document.createTextNode('Error: ' + errorMessage(data, fallback)));
+
+        if (details && typeof details === 'object' && (details.wc_edit_url || details.rs_product_url)) {
+            var $links = $('<span class="woo-rs-sync-error-links"> — </span>');
+
+            if (details.wc_edit_url) {
+                $links.append($('<a>', {
+                    href: details.wc_edit_url,
+                    text: 'Open WooCommerce product',
+                    target: '_blank',
+                    rel: 'noopener noreferrer'
+                }));
+            }
+
+            if (details.rs_product_url) {
+                if (details.wc_edit_url) {
+                    $links.append(document.createTextNode(' | '));
+                }
+                $links.append($('<a>', {
+                    href: details.rs_product_url,
+                    text: 'Open RepairShopr product',
+                    target: '_blank',
+                    rel: 'noopener noreferrer'
+                }));
+            }
+
+            $status.append($links);
+        }
+    }
+
     $('#woo-rs-start-sync').on('click', function (e) {
         e.preventDefault();
 
@@ -58,7 +92,7 @@ jQuery(document).ready(function ($) {
                 if (!response.success) {
                     syncInProgress = false;
                     $('#woo-rs-start-sync').prop('disabled', false);
-                    $('#woo-rs-sync-status').text('Error: ' + errorMessage(response.data, 'Unknown error'));
+                    renderSyncError(response.data, 'Unknown error');
                     return;
                 }
 
@@ -102,7 +136,7 @@ jQuery(document).ready(function ($) {
                 syncInProgress = false;
                 $('#woo-rs-start-sync').prop('disabled', false);
                 var payload = xhr.responseJSON && xhr.responseJSON.data ? xhr.responseJSON.data : null;
-                $('#woo-rs-sync-status').text('AJAX Error: ' + errorMessage(payload, error));
+                renderSyncError(payload, error);
             }
         });
     }

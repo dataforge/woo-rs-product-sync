@@ -124,6 +124,8 @@ class WOO_RS_Product_Sync {
             $error = new WP_Error( 'rs_sku_conflict', $message, array(
                 'rs_product_id' => (int) $rs_product['id'],
                 'wc_product_id' => $conflict_id,
+                'wc_edit_url'   => get_edit_post_link( $conflict_id, 'raw' ),
+                'rs_product_url' => self::repairshopr_product_url( $rs_product['id'] ),
             ) );
             self::log_sync( $rs_product['id'], $conflict_id, 'error', $source, array(), $error->get_error_code(), $error->get_error_message() );
             return array( 'action' => 'error', 'wc_product_id' => $conflict_id, 'error' => $error );
@@ -188,6 +190,16 @@ class WOO_RS_Product_Sync {
             return (int) $product_id;
         }
         return 0;
+    }
+
+    /** Build the authenticated RepairShopr product page URL from the API base URL. */
+    private static function repairshopr_product_url( $rs_product_id ) {
+        $api_url = WOO_RS_API_Client::get_api_url();
+        if ( '' === $api_url ) {
+            return '';
+        }
+        $base_url = preg_replace( '#/api/v1/?$#', '', $api_url );
+        return esc_url_raw( trailingslashit( $base_url ) . 'products/' . rawurlencode( (string) $rs_product_id ) );
     }
 
     /**
