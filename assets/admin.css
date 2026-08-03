@@ -214,6 +214,11 @@
     text-transform: uppercase;
 }
 
+.woo-rs-sync-conflict-id {
+    color: #50575e;
+    font-size: 12px;
+}
+
 .woo-rs-sync-conflict-link {
     margin-top: 3px;
 }

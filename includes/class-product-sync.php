@@ -121,6 +121,7 @@ class WOO_RS_Product_Sync {
                 'rs_product_id' => (int) $rs_product['id'],
                 'wc_product_id' => $conflict_id,
                 'wc_product_name' => $conflict_name,
+                'wc_product_sku'  => $conflict_product ? (string) $conflict_product->get_sku() : '',
                 'rs_product_name' => $rs_name,
                 'wc_edit_url'     => get_edit_post_link( $conflict_id, 'raw' ),
                 'rs_product_url' => self::repairshopr_product_url( $rs_product['id'] ),

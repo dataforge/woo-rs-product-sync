@@ -79,7 +79,8 @@ jQuery(document).ready(function ($) {
         var $card = $('<div>', { 'class': 'woo-rs-sync-conflict' });
         var $woo = $('<div>', { 'class': 'woo-rs-sync-conflict-product' })
             .append($('<span>', { 'class': 'woo-rs-sync-conflict-label', text: 'WooCommerce product' }))
-            .append($('<strong>', { text: details.wc_product_name || 'Unknown WooCommerce product' }));
+            .append($('<strong>', { text: details.wc_product_name || 'Unknown WooCommerce product' }))
+            .append($('<span>', { 'class': 'woo-rs-sync-conflict-id', text: ' — SKU: ' + (details.wc_product_sku || 'Unknown') }));
         var wooLink = productLink(details.wc_edit_url, 'Open WooCommerce product');
         if (wooLink) {
             $woo.append($('<div>', { 'class': 'woo-rs-sync-conflict-link' }).append(wooLink));
@@ -87,7 +88,8 @@ jQuery(document).ready(function ($) {
 
         var $rs = $('<div>', { 'class': 'woo-rs-sync-conflict-product' })
             .append($('<span>', { 'class': 'woo-rs-sync-conflict-label', text: 'RepairShopr product' }))
-            .append($('<strong>', { text: details.rs_product_name || 'Unknown RepairShopr product' }));
+            .append($('<strong>', { text: details.rs_product_name || 'Unknown RepairShopr product' }))
+            .append($('<span>', { 'class': 'woo-rs-sync-conflict-id', text: ' — Product ID: ' + details.rs_product_id }));
         var rsLink = productLink(details.rs_product_url, 'Open RepairShopr product');
         if (rsLink) {
             $rs.append($('<div>', { 'class': 'woo-rs-sync-conflict-link' }).append(rsLink));
