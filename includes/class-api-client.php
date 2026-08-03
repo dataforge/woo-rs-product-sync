@@ -7,7 +7,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class WOO_RS_API_Client {
 
     const MAX_CALLS_PER_INTERVAL = 160;
-    const INTERVAL_SECONDS       = 300;
+    const INTERVAL_SECONDS       = 60;
 
     const RATE_STATE_OPTION = 'woo_rs_product_sync_rate_state';
     const RATE_LOCK_KEY     = 'repairshopr_api_rate_limit';
