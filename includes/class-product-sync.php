@@ -115,16 +115,14 @@ class WOO_RS_Product_Sync {
         if ( $conflict_id ) {
             $conflict_product = wc_get_product( $conflict_id );
             $conflict_name    = $conflict_product ? $conflict_product->get_name() : __( 'Unknown product', 'woo-rs-product-sync' );
-            $message = sprintf(
-                __( 'RepairShopr product %1$s cannot be synced because WooCommerce product #%2$d, "%3$s", already uses SKU "%1$s" but is not linked to RepairShopr. Sync stopped to avoid overwriting that product. If they are the same item, link product #%2$d by setting its _rs_product_id meta to %1$s; otherwise change the existing WooCommerce SKU and run sync again.', 'woo-rs-product-sync' ),
-                (string) $rs_product['id'],
-                $conflict_id,
-                $conflict_name
-            );
+            $rs_name          = ! empty( $rs_product['name'] ) ? (string) $rs_product['name'] : __( 'Unnamed RepairShopr product', 'woo-rs-product-sync' );
+            $message          = __( 'A product with this SKU already exists in WooCommerce. Confirm whether these products are the same item.', 'woo-rs-product-sync' );
             $error = new WP_Error( 'rs_sku_conflict', $message, array(
                 'rs_product_id' => (int) $rs_product['id'],
                 'wc_product_id' => $conflict_id,
-                'wc_edit_url'   => get_edit_post_link( $conflict_id, 'raw' ),
+                'wc_product_name' => $conflict_name,
+                'rs_product_name' => $rs_name,
+                'wc_edit_url'     => get_edit_post_link( $conflict_id, 'raw' ),
                 'rs_product_url' => self::repairshopr_product_url( $rs_product['id'] ),
             ) );
             self::log_sync( $rs_product['id'], $conflict_id, 'error', $source, array(), $error->get_error_code(), $error->get_error_message() );
@@ -190,6 +188,42 @@ class WOO_RS_Product_Sync {
             return (int) $product_id;
         }
         return 0;
+    }
+
+    /**
+     * Claim a WooCommerce product for RepairShopr after an administrator has
+     * explicitly confirmed an unlinked SKU match.
+     *
+     * @return true|WP_Error
+     */
+    public static function link_wc_product_to_rs( $wc_product_id, $rs_product_id ) {
+        if ( ! class_exists( 'WooCommerce' ) || ! function_exists( 'wc_get_product' ) ) {
+            return new WP_Error( 'woocommerce_inactive', __( 'WooCommerce is not active.', 'woo-rs-product-sync' ) );
+        }
+
+        $wc_product_id = absint( $wc_product_id );
+        $rs_product_id = absint( $rs_product_id );
+        if ( ! $wc_product_id || ! $rs_product_id ) {
+            return new WP_Error( 'invalid_product_match', __( 'Both product IDs are required to match products.', 'woo-rs-product-sync' ) );
+        }
+
+        $product = wc_get_product( $wc_product_id );
+        if ( ! $product ) {
+            return new WP_Error( 'woocommerce_product_not_found', __( 'The WooCommerce product could not be found.', 'woo-rs-product-sync' ) );
+        }
+
+        $expected_sku = (string) $rs_product_id;
+        if ( $expected_sku !== (string) $product->get_sku() ) {
+            return new WP_Error( 'sku_changed', __( 'The WooCommerce product SKU changed before this match was confirmed. Refresh and try again.', 'woo-rs-product-sync' ) );
+        }
+
+        $linked_rs_id = (string) get_post_meta( $wc_product_id, '_rs_product_id', true );
+        if ( '' !== $linked_rs_id && $expected_sku !== $linked_rs_id ) {
+            return new WP_Error( 'already_linked', __( 'This WooCommerce product is already linked to a different RepairShopr product.', 'woo-rs-product-sync' ) );
+        }
+
+        update_post_meta( $wc_product_id, '_rs_product_id', $expected_sku );
+        return true;
     }
 
     /** Build the authenticated RepairShopr product page URL from the API base URL. */

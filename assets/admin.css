@@ -187,3 +187,39 @@
     font-weight: 600;
     font-size: 13px;
 }
+
+.woo-rs-sync-conflict {
+    max-width: 620px;
+    margin-top: 10px;
+    padding: 12px 16px;
+    background: #fff8e5;
+    border-left: 4px solid #dba617;
+    font-weight: normal;
+}
+
+.woo-rs-sync-conflict p {
+    margin: 0 0 12px;
+}
+
+.woo-rs-sync-conflict-product {
+    margin: 10px 0;
+}
+
+.woo-rs-sync-conflict-label {
+    display: block;
+    margin-bottom: 2px;
+    color: #50575e;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.woo-rs-sync-conflict-link {
+    margin-top: 3px;
+}
+
+.woo-rs-sync-conflict-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+}

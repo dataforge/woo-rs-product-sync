@@ -15,6 +15,7 @@ class WOO_RS_Cron {
         add_action( self::HOOK, array( __CLASS__, 'run_sync' ) );
         add_action( self::CONTINUATION_HOOK, array( __CLASS__, 'run_sync' ) );
         add_action( 'wp_ajax_woo_rs_run_manual_sync', array( __CLASS__, 'ajax_manual_sync_batch' ) );
+        add_action( 'wp_ajax_woo_rs_match_sku_conflict', array( __CLASS__, 'ajax_match_sku_conflict' ) );
     }
 
     /**
@@ -251,6 +252,33 @@ class WOO_RS_Cron {
             'stats'     => $stats,
             'more'      => $more,
             'next_page' => $more ? $page + 1 : null,
+        ) );
+    }
+
+    /** Link a confirmed WooCommerce/RepairShopr SKU match from the sync screen. */
+    public static function ajax_match_sku_conflict() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( array( 'message' => __( 'Permission denied.', 'woo-rs-product-sync' ) ), 403 );
+        }
+
+        check_ajax_referer( 'woo_rs_product_sync_nonce', 'nonce' );
+
+        $rs_product_id = isset( $_POST['rs_product_id'] ) ? absint( $_POST['rs_product_id'] ) : 0;
+        $wc_product_id = isset( $_POST['wc_product_id'] ) ? absint( $_POST['wc_product_id'] ) : 0;
+        $result        = WOO_RS_Product_Sync::link_wc_product_to_rs( $wc_product_id, $rs_product_id );
+
+        if ( is_wp_error( $result ) ) {
+            wp_send_json_error( array(
+                'code'    => $result->get_error_code(),
+                'message' => $result->get_error_message(),
+                'data'    => $result->get_error_data(),
+            ) );
+        }
+
+        wp_send_json_success( array(
+            'message'       => __( 'Products matched. Restarting the sync.', 'woo-rs-product-sync' ),
+            'rs_product_id' => $rs_product_id,
+            'wc_product_id' => $wc_product_id,
         ) );
     }
 

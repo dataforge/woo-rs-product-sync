@@ -27,6 +27,11 @@ jQuery(document).ready(function ($) {
         var $status = $('#woo-rs-sync-status');
         var details = data && data.data && typeof data.data === 'object' ? data.data : data;
 
+        if (data && data.code === 'rs_sku_conflict' && details && details.wc_product_id && details.rs_product_id) {
+            renderSkuConflict(details);
+            return;
+        }
+
         $status.empty().append(document.createTextNode('Error: ' + errorMessage(data, fallback)));
 
         if (details && typeof details === 'object' && (details.wc_edit_url || details.rs_product_url)) {
@@ -55,6 +60,96 @@ jQuery(document).ready(function ($) {
 
             $status.append($links);
         }
+    }
+
+    function productLink(url, label) {
+        if (!url) {
+            return null;
+        }
+        return $('<a>', {
+            href: url,
+            text: label,
+            target: '_blank',
+            rel: 'noopener noreferrer'
+        });
+    }
+
+    function renderSkuConflict(details) {
+        var $status = $('#woo-rs-sync-status').empty();
+        var $card = $('<div>', { 'class': 'woo-rs-sync-conflict' });
+        var $woo = $('<div>', { 'class': 'woo-rs-sync-conflict-product' })
+            .append($('<span>', { 'class': 'woo-rs-sync-conflict-label', text: 'WooCommerce product' }))
+            .append($('<strong>', { text: details.wc_product_name || 'Unknown WooCommerce product' }));
+        var wooLink = productLink(details.wc_edit_url, 'Open WooCommerce product');
+        if (wooLink) {
+            $woo.append($('<div>', { 'class': 'woo-rs-sync-conflict-link' }).append(wooLink));
+        }
+
+        var $rs = $('<div>', { 'class': 'woo-rs-sync-conflict-product' })
+            .append($('<span>', { 'class': 'woo-rs-sync-conflict-label', text: 'RepairShopr product' }))
+            .append($('<strong>', { text: details.rs_product_name || 'Unknown RepairShopr product' }));
+        var rsLink = productLink(details.rs_product_url, 'Open RepairShopr product');
+        if (rsLink) {
+            $rs.append($('<div>', { 'class': 'woo-rs-sync-conflict-link' }).append(rsLink));
+        }
+
+        var $actions = $('<div>', { 'class': 'woo-rs-sync-conflict-actions' });
+        var $match = $('<button>', { type: 'button', 'class': 'button button-primary', text: 'Match & Continue' });
+        var $notMatch = $('<button>', { type: 'button', 'class': 'button', text: 'Not a Match' });
+
+        $match.on('click', function () {
+            $match.add($notMatch).prop('disabled', true);
+            $.ajax({
+                url: woo_rs_sync.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'woo_rs_match_sku_conflict',
+                    nonce: woo_rs_sync.nonce,
+                    rs_product_id: details.rs_product_id,
+                    wc_product_id: details.wc_product_id
+                },
+                success: function (response) {
+                    if (!response.success) {
+                        renderSyncError(response.data, 'Unable to match these products.');
+                        return;
+                    }
+                    $status.text('Products matched. Restarting full sync...');
+                    $('#woo-rs-start-sync').prop('disabled', false).trigger('click');
+                },
+                error: function (xhr, status, error) {
+                    var payload = xhr.responseJSON && xhr.responseJSON.data ? xhr.responseJSON.data : null;
+                    renderSyncError(payload, error);
+                }
+            });
+        });
+
+        $notMatch.on('click', function () {
+            $status.empty().append(document.createTextNode('Products were not linked. Change the WooCommerce product SKU, then run the sync again.'));
+            if (details.wc_edit_url || details.rs_product_url) {
+                var $links = $('<span class="woo-rs-sync-error-links"> â€” </span>');
+                var notMatchWooLink = productLink(details.wc_edit_url, 'Open WooCommerce product');
+                var notMatchRsLink = productLink(details.rs_product_url, 'Open RepairShopr product');
+                if (notMatchWooLink) {
+                    $links.append(notMatchWooLink);
+                }
+                if (notMatchWooLink && notMatchRsLink) {
+                    $links.append(document.createTextNode(' | '));
+                }
+                if (notMatchRsLink) {
+                    $links.append(notMatchRsLink);
+                }
+                $status.append($links);
+            }
+        });
+
+        $actions.append($match, $notMatch);
+        $card.append(
+            $('<p>', { text: 'A WooCommerce product already has the same SKU. Are these the same item?' }),
+            $woo,
+            $rs,
+            $actions
+        );
+        $status.append($card);
     }
 
     $('#woo-rs-start-sync').on('click', function (e) {
