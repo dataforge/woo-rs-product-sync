@@ -203,6 +203,7 @@ class WOO_RS_Cron {
         $skip_product_ids = isset( $_POST['skip_product_ids'] ) && is_array( $_POST['skip_product_ids'] )
             ? array_unique( array_filter( array_map( 'absint', wp_unslash( $_POST['skip_product_ids'] ) ) ) )
             : array();
+        $auto_match_sku_conflicts = ! empty( $_POST['auto_match_sku_conflicts'] );
         // Clamp to a sane window: callers can't request 99,999 in one shot.
         $per_page = max( 1, min( 100, $per_page ) );
         $page     = min( $page, WOO_RS_API_Client::MAX_PAGES );
@@ -217,7 +218,7 @@ class WOO_RS_Cron {
             ) );
         }
 
-        $stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0 );
+        $stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'matched' => 0 );
 
         foreach ( $products as $rs_product ) {
             $rs_product_id = isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0;
@@ -237,6 +238,26 @@ class WOO_RS_Cron {
             }
             if ( isset( $result['action'] ) && 'error' === $result['action'] ) {
                 $error = isset( $result['error'] ) && is_wp_error( $result['error'] ) ? $result['error'] : null;
+                if ( $auto_match_sku_conflicts && $error && 'rs_sku_conflict' === $error->get_error_code() ) {
+                    $linked = WOO_RS_Product_Sync::link_wc_product_to_rs(
+                        isset( $result['wc_product_id'] ) ? (int) $result['wc_product_id'] : 0,
+                        $rs_product_id
+                    );
+                    if ( ! is_wp_error( $linked ) ) {
+                        $stats['matched']++;
+                        $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'manual' );
+                        $error  = isset( $result['error'] ) && is_wp_error( $result['error'] ) ? $result['error'] : null;
+                    } else {
+                        $error = $linked;
+                    }
+                }
+
+                if ( ! isset( $result['action'] ) || 'error' !== $result['action'] ) {
+                    if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
+                        $stats[ $result['action'] ]++;
+                    }
+                    continue;
+                }
                 wp_send_json_error( array(
                     'code'          => $error ? $error->get_error_code() : 'sync_failed',
                     'message'       => $error ? $error->get_error_message() : __( 'This product could not be synced.', 'woo-rs-product-sync' ),

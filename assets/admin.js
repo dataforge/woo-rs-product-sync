@@ -7,7 +7,9 @@ jQuery(document).ready(function ($) {
     var totalCreated   = 0;
     var totalUpdated   = 0;
     var totalSkipped   = 0;
+    var totalMatched   = 0;
     var skippedConflictProductIds = {};
+    var autoMatchSkuConflicts = false;
     var currentSyncPage = 1;
 
     function errorMessage(data, fallback) {
@@ -104,10 +106,11 @@ jQuery(document).ready(function ($) {
 
         var $actions = $('<div>', { 'class': 'woo-rs-sync-conflict-actions' });
         var $match = $('<button>', { type: 'button', 'class': 'button button-primary', text: 'Match & Continue' });
+        var $matchAll = $('<button>', { type: 'button', 'class': 'button', text: 'Match All Unambiguous & Continue' });
         var $notMatch = $('<button>', { type: 'button', 'class': 'button', text: 'Not a Match — Skip for Now' });
 
-        $match.on('click', function () {
-            $match.add($notMatch).prop('disabled', true);
+        function matchAndContinue(matchAll) {
+            $match.add($matchAll).add($notMatch).prop('disabled', true);
             $.ajax({
                 url: woo_rs_sync.ajax_url,
                 type: 'POST',
@@ -122,6 +125,7 @@ jQuery(document).ready(function ($) {
                         renderSyncError(response.data, 'Unable to match these products.');
                         return;
                     }
+                    autoMatchSkuConflicts = matchAll;
                     $status.text('Products matched. Continuing full sync...');
                     syncInProgress = true;
                     $('#woo-rs-start-sync').prop('disabled', true);
@@ -132,6 +136,16 @@ jQuery(document).ready(function ($) {
                     renderSyncError(payload, error);
                 }
             });
+        }
+
+        $match.on('click', function () {
+            matchAndContinue(false);
+        });
+
+        $matchAll.on('click', function () {
+            if (window.confirm('Match every one-to-one WooCommerce/RepairShopr SKU pair found during this sync? Products with duplicate WooCommerce SKUs will remain blocked.')) {
+                matchAndContinue(true);
+            }
         });
 
         $notMatch.on('click', function () {
@@ -142,7 +156,7 @@ jQuery(document).ready(function ($) {
             processBatch(currentSyncPage);
         });
 
-        $actions.append($match, $notMatch);
+        $actions.append($match, $matchAll, $notMatch);
         $card.append(
             $('<p>', { text: 'A WooCommerce product already has the same SKU. Are these the same item?' }),
             $woo,
@@ -201,7 +215,9 @@ jQuery(document).ready(function ($) {
         totalCreated   = 0;
         totalUpdated   = 0;
         totalSkipped   = 0;
+        totalMatched   = 0;
         skippedConflictProductIds = {};
+        autoMatchSkuConflicts = false;
 
         $(this).prop('disabled', true);
         $('.woo-rs-progress-container').show();
@@ -221,7 +237,8 @@ jQuery(document).ready(function ($) {
                 nonce:    woo_rs_sync.nonce,
                 page:     page,
                 per_page: 50,
-                skip_product_ids: Object.keys(skippedConflictProductIds)
+                skip_product_ids: Object.keys(skippedConflictProductIds),
+                auto_match_sku_conflicts: autoMatchSkuConflicts ? 1 : 0
             },
             success: function (response) {
                 if (!response.success) {
@@ -253,13 +270,15 @@ jQuery(document).ready(function ($) {
                 totalCreated   += data.stats.created;
                 totalUpdated   += data.stats.updated;
                 totalSkipped   += data.stats.skipped;
+                totalMatched   += data.stats.matched || 0;
 
                 // Update status text
                 $('#woo-rs-sync-status').text(
                     'Processed ' + totalProcessed + ' products — ' +
                     totalCreated + ' created, ' +
                     totalUpdated + ' updated, ' +
-                    totalSkipped + ' skipped'
+                    totalSkipped + ' skipped' +
+                    (totalMatched ? ', ' + totalMatched + ' matched' : '')
                 );
 
                 if (data.more && data.next_page) {
@@ -274,7 +293,8 @@ jQuery(document).ready(function ($) {
                         'Sync complete! Processed ' + totalProcessed + ' products — ' +
                         totalCreated + ' created, ' +
                         totalUpdated + ' updated, ' +
-                        totalSkipped + ' skipped'
+                        totalSkipped + ' skipped' +
+                        (totalMatched ? ', ' + totalMatched + ' matched' : '')
                     );
                     syncInProgress = false;
                     $('#woo-rs-start-sync').prop('disabled', false);
