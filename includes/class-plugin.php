@@ -89,12 +89,13 @@ class WOO_RS_Plugin {
         $charset = $wpdb->get_charset_collate();
 
         $sql = "CREATE TABLE {$table} (
-            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             http_method VARCHAR(10),
             headers LONGTEXT,
             payload LONGTEXT,
             source_ip VARCHAR(45),
+            PRIMARY KEY  (id),
             INDEX idx_received (received_at)
         ) {$charset};";
 
@@ -112,7 +113,7 @@ class WOO_RS_Plugin {
         $charset = $wpdb->get_charset_collate();
 
         $sql = "CREATE TABLE {$table} (
-            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             rs_product_id BIGINT UNSIGNED,
             wc_product_id BIGINT UNSIGNED,
@@ -121,6 +122,7 @@ class WOO_RS_Plugin {
             changes LONGTEXT,
             error_code VARCHAR(64) DEFAULT NULL,
             error_message TEXT DEFAULT NULL,
+            PRIMARY KEY  (id),
             INDEX idx_synced_at (synced_at),
             INDEX idx_rs_product_id (rs_product_id)
         ) {$charset};";

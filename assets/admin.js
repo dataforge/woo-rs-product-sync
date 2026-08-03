@@ -8,6 +8,21 @@ jQuery(document).ready(function ($) {
     var totalUpdated   = 0;
     var totalSkipped   = 0;
 
+    function errorMessage(data, fallback) {
+        if (data && typeof data === 'object') {
+            if (data.message) {
+                return data.message;
+            }
+            if (data.data && data.data.message) {
+                return data.data.message;
+            }
+            if (data.code) {
+                return data.code;
+            }
+        }
+        return data || fallback;
+    }
+
     $('#woo-rs-start-sync').on('click', function (e) {
         e.preventDefault();
 
@@ -43,7 +58,7 @@ jQuery(document).ready(function ($) {
                 if (!response.success) {
                     syncInProgress = false;
                     $('#woo-rs-start-sync').prop('disabled', false);
-                    $('#woo-rs-sync-status').text('Error: ' + (response.data || 'Unknown error'));
+                    $('#woo-rs-sync-status').text('Error: ' + errorMessage(response.data, 'Unknown error'));
                     return;
                 }
 
@@ -86,7 +101,8 @@ jQuery(document).ready(function ($) {
             error: function (xhr, status, error) {
                 syncInProgress = false;
                 $('#woo-rs-start-sync').prop('disabled', false);
-                $('#woo-rs-sync-status').text('AJAX Error: ' + error);
+                var payload = xhr.responseJSON && xhr.responseJSON.data ? xhr.responseJSON.data : null;
+                $('#woo-rs-sync-status').text('AJAX Error: ' + errorMessage(payload, error));
             }
         });
     }
