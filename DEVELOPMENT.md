@@ -28,7 +28,8 @@ WordPress/WooCommerce plugin that syncs products from RepairShopr (RS) to WooCom
 - A product disabled in RS is drafted. When it is re-enabled, only a draft created by this plugin is restored; an administrator's manual draft is preserved.
 - New products use the configured default status (draft, pending, or publish).
 - The shared RepairShopr API limit is 160 calls per 60 seconds. Cron sync saves a category/page cursor and resumes after rate limiting.
-- Product writes use a database-backed lock. The lock lifetime covers the longest optional OpenAI request.
+- Product writes use a database-backed lock, but the lock is held only for the fast DB-write path: the optional OpenAI rewrite is deferred until after the per-product lock is released.
+- OpenAI rewrites are throttled (default 25 per 60 seconds, configurable via `woo_rs_product_sync_openai_max_rewrites`). A failed or throttled rewrite is marked pending (`_rs_openai_rewrite_pending`) and retried on the next sync of that product.
 - OpenAI models have different configurations; see `WOO_RS_OpenAI::$model_config`.
 - Bump `WOO_RS_PRODUCT_SYNC_VERSION` whenever JavaScript or CSS changes to invalidate browser caches.
 

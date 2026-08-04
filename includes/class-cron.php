@@ -9,11 +9,16 @@ class WOO_RS_Cron {
     const HOOK                = 'woo_rs_product_sync_cron';
     const CONTINUATION_HOOK   = 'woo_rs_product_sync_continue';
     const CONTINUATION_OPTION = 'woo_rs_product_sync_continuation';
+    const PRUNE_HOOK          = 'woo_rs_product_sync_prune_logs';
+
+    /** Retention window for webhook and sync log rows (pruned daily). */
+    const LOG_RETENTION_DAYS = 30;
 
     public static function init() {
         add_filter( 'cron_schedules', array( __CLASS__, 'add_custom_interval' ) );
         add_action( self::HOOK, array( __CLASS__, 'run_sync' ) );
         add_action( self::CONTINUATION_HOOK, array( __CLASS__, 'run_sync' ) );
+        add_action( self::PRUNE_HOOK, array( __CLASS__, 'prune_logs' ) );
         add_action( 'wp_ajax_woo_rs_run_manual_sync', array( __CLASS__, 'ajax_manual_sync_batch' ) );
         add_action( 'wp_ajax_woo_rs_match_sku_conflict', array( __CLASS__, 'ajax_match_sku_conflict' ) );
     }
@@ -39,6 +44,11 @@ class WOO_RS_Cron {
      * Schedule the cron event.
      */
     public static function schedule() {
+        // Log retention runs regardless of the auto-sync toggle.
+        if ( ! wp_next_scheduled( self::PRUNE_HOOK ) ) {
+            wp_schedule_event( time(), 'daily', self::PRUNE_HOOK );
+        }
+
         $auto_sync = get_option( 'woo_rs_product_sync_auto_sync', 0 );
 
         if ( $auto_sync ) {
@@ -54,7 +64,17 @@ class WOO_RS_Cron {
     public static function unschedule() {
         wp_clear_scheduled_hook( self::HOOK );
         wp_clear_scheduled_hook( self::CONTINUATION_HOOK );
+        wp_clear_scheduled_hook( self::PRUNE_HOOK );
         delete_option( self::CONTINUATION_OPTION );
+    }
+
+    /**
+     * Daily retention job: delete webhook and sync log rows older than
+     * LOG_RETENTION_DAYS so neither table grows unbounded on active stores.
+     */
+    public static function prune_logs() {
+        WOO_RS_DB::prune( 'webhook_log', 'received_at', self::LOG_RETENTION_DAYS );
+        WOO_RS_DB::prune( 'sync_log', 'synced_at', self::LOG_RETENTION_DAYS );
     }
 
     /**
@@ -81,11 +101,25 @@ class WOO_RS_Cron {
             return;
         }
 
+        // Self-heal for installs upgraded before the retention job existed:
+        // make sure the daily prune hook is scheduled even if settings were
+        // never re-saved after the upgrade.
+        if ( ! wp_next_scheduled( self::PRUNE_HOOK ) ) {
+            wp_schedule_event( time(), 'daily', self::PRUNE_HOOK );
+        }
+
+        // If the auto-sync hook fires while a rate-limit continuation is still
+        // pending, let the continuation finish instead of consuming its cursor
+        // and then re-running a fresh full sync when the continuation fires.
+        if ( current_filter() === self::HOOK && wp_next_scheduled( self::CONTINUATION_HOOK ) ) {
+            return;
+        }
+
         $continuation = get_option( self::CONTINUATION_OPTION, array() );
         $continuation = is_array( $continuation ) ? $continuation : array();
         $stats        = isset( $continuation['stats'] ) && is_array( $continuation['stats'] )
-            ? array_merge( array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 ), $continuation['stats'] )
-            : array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'errors' => 0 );
+            ? array_merge( array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'error' => 0 ), $continuation['stats'] )
+            : array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'error' => 0 );
         $last_error   = '';
 
         if ( 'categories' === ( $continuation['mode'] ?? '' ) && ! empty( $continuation['categories'] ) && is_array( $continuation['categories'] ) ) {
@@ -131,7 +165,18 @@ class WOO_RS_Cron {
                         break; // non-rate-limit error: skip this category, continue with next
                     }
                     foreach ( $products as $rs_product ) {
-                        $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'cron' );
+                        $rs_product_id = isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0;
+                        try {
+                            $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'cron' );
+                        } catch ( \Throwable $e ) {
+                            // A WC_Data_Exception/TypeError thrown inside
+                            // sync_product_locked() must not abort the whole
+                            // run. Log it, count it, and continue (mirrors the
+                            // manual AJAX path).
+                            WOO_RS_Product_Sync::log_sync( $rs_product_id, 0, 'error', 'cron', array(), 'sync_exception', $e->getMessage() );
+                            $stats['error']++;
+                            continue;
+                        }
                         if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
                             $stats[ $result['action'] ]++;
                         }
@@ -157,7 +202,16 @@ class WOO_RS_Cron {
                     break;
                 }
                 foreach ( $products as $rs_product ) {
-                    $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'cron' );
+                    $rs_product_id = isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0;
+                    try {
+                        $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'cron' );
+                    } catch ( \Throwable $e ) {
+                        // Same guard as the category path: never abort the
+                        // whole run on a single product failure.
+                        WOO_RS_Product_Sync::log_sync( $rs_product_id, 0, 'error', 'cron', array(), 'sync_exception', $e->getMessage() );
+                        $stats['error']++;
+                        continue;
+                    }
                     if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
                         $stats[ $result['action'] ]++;
                     }
@@ -218,7 +272,7 @@ class WOO_RS_Cron {
             ) );
         }
 
-        $stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'matched' => 0 );
+        $stats = array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'matched' => 0, 'error' => 0 );
 
         foreach ( $products as $rs_product ) {
             $rs_product_id = isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0;
@@ -230,11 +284,8 @@ class WOO_RS_Cron {
                 $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'manual' );
             } catch ( \Throwable $e ) {
                 WOO_RS_Product_Sync::log_sync( $rs_product_id, 0, 'error', 'manual', array(), 'sync_exception', $e->getMessage() );
-                wp_send_json_error( array(
-                    'code'       => 'sync_exception',
-                    'message'    => $e->getMessage(),
-                    'product_id' => $rs_product_id,
-                ) );
+                $stats['error']++;
+                continue;
             }
             if ( isset( $result['action'] ) && 'error' === $result['action'] ) {
                 $error = isset( $result['error'] ) && is_wp_error( $result['error'] ) ? $result['error'] : null;
@@ -258,13 +309,23 @@ class WOO_RS_Cron {
                     }
                     continue;
                 }
-                wp_send_json_error( array(
-                    'code'          => $error ? $error->get_error_code() : 'sync_failed',
-                    'message'       => $error ? $error->get_error_message() : __( 'This product could not be synced.', 'woo-rs-product-sync' ),
-                    'data'          => $error ? $error->get_error_data() : array(),
-                    'rs_product_id' => isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0,
-                    'wc_product_id' => isset( $result['wc_product_id'] ) ? (int) $result['wc_product_id'] : 0,
-                ) );
+
+                // Interactive conflict errors stop the batch so the admin can
+                // resolve them on screen. Any other error is counted and the
+                // batch continues — a transient save failure must not abort the
+                // whole run and force a restart on the same product.
+                if ( $error && in_array( $error->get_error_code(), array( 'rs_sku_conflict', 'rs_duplicate_wc_sku' ), true ) ) {
+                    wp_send_json_error( array(
+                        'code'          => $error->get_error_code(),
+                        'message'       => $error->get_error_message(),
+                        'data'          => $error->get_error_data(),
+                        'rs_product_id' => isset( $rs_product['id'] ) ? (int) $rs_product['id'] : 0,
+                        'wc_product_id' => isset( $result['wc_product_id'] ) ? (int) $result['wc_product_id'] : 0,
+                    ) );
+                }
+
+                $stats['error']++;
+                continue;
             }
             if ( isset( $result['action'] ) && isset( $stats[ $result['action'] ] ) ) {
                 $stats[ $result['action'] ]++;

@@ -40,7 +40,11 @@ class WOO_RS_Product_Sync {
         'tax_rate_id'         => '_rs_tax_rate_id',
         'vendor_ids'          => '_rs_vendor_ids',
         'location_quantities'  => '_rs_location_quantities',
+        // RepairShopr product objects expose `updated_at`; `since_updated_at`
+        // is a listing query parameter, not a field. Map both to the same meta
+        // key with `updated_at` last so it wins when a payload sends both.
         'since_updated_at'     => '_rs_last_updated',
+        'updated_at'           => '_rs_last_updated',
     );
 
     /**
@@ -59,7 +63,14 @@ class WOO_RS_Product_Sync {
         }
 
         $rs_category = isset( $rs_product['product_category'] ) ? $rs_product['product_category'] : '';
-        if ( ! self::is_category_allowed( $rs_category ) ) {
+        // Resolve the linked WC product once; the category gate and the sync
+        // flow below reuse it instead of running a duplicate meta query.
+        $linked_product_id = self::find_wc_product( $rs_product['id'] );
+        // Category mapping gates NEW syncs. Products already linked to this
+        // plugin are kept in sync even when their category is unmapped (or
+        // absent from the payload) — otherwise webhook/cron updates silently
+        // stall. Category reassignment itself stays gated inside update_product().
+        if ( ! self::is_category_allowed( $rs_category ) && ! $linked_product_id ) {
             self::log_sync( $rs_product['id'], 0, 'skipped', $source, array( 'reason' => 'unmapped_category', 'category' => $rs_category ) );
             return array( 'action' => 'skipped', 'reason' => 'unmapped_category' );
         }
@@ -75,16 +86,31 @@ class WOO_RS_Product_Sync {
         }
 
         try {
-            return self::sync_product_locked( $rs_product, $source );
+            $result = self::sync_product_locked( $rs_product, $source, $linked_product_id );
         } finally {
             WOO_RS_Locks::release( $lock_key, $token );
         }
+
+        // Defer the (potentially slow) OpenAI rewrite until after the product
+        // lock is released, so a webhook/cron worker waiting on the same
+        // product is not blocked for minutes while the model runs. Logging
+        // still reports the rewrite result. Rewrites are also retried when a
+        // previous attempt failed or was throttled (see _rs_openai_rewrite_pending).
+        $rewrite_id = ( is_array( $result ) && ! empty( $result['wc_product_id'] ) ) ? (int) $result['wc_product_id'] : 0;
+        if ( $rewrite_id && ( ! empty( $result['openai_rewrite'] ) || ( WOO_RS_OpenAI::is_enabled() && metadata_exists( 'post', $rewrite_id, '_rs_openai_rewrite_pending' ) ) ) ) {
+            self::maybe_openai_rewrite( $rewrite_id, $rs_product );
+        }
+
+        return $result;
     }
 
     /**
      * Inner sync flow — runs while the per-product lock is held.
+     *
+     * @param int|string $linked_product_id  WC product already resolved by the
+     *                                       category gate, or 0 to re-lookup.
      */
-    private static function sync_product_locked( $rs_product, $source ) {
+    private static function sync_product_locked( $rs_product, $source, $linked_product_id = 0 ) {
         $sku_product_ids = self::find_products_by_sku( $rs_product['id'] );
         if ( count( $sku_product_ids ) > 1 ) {
             $wc_products = array();
@@ -112,7 +138,7 @@ class WOO_RS_Product_Sync {
             return array( 'action' => 'error', 'wc_product_id' => 0, 'error' => $error );
         }
 
-        $wc_product_id = self::find_wc_product( $rs_product['id'] );
+        $wc_product_id = $linked_product_id ? $linked_product_id : self::find_wc_product( $rs_product['id'] );
 
         if ( $wc_product_id ) {
             $changes = self::update_product( $wc_product_id, $rs_product );
@@ -125,14 +151,16 @@ class WOO_RS_Product_Sync {
                 return array( 'action' => 'error', 'wc_product_id' => $wc_product_id, 'error' => $changes );
             }
 
-            // OpenAI description rewrite if description changed
-            if ( isset( $changes['description'] ) ) {
-                self::maybe_openai_rewrite( $wc_product_id, $rs_product );
-            }
-
-            $action  = ! empty( $changes ) ? 'updated' : 'skipped';
+            $action = ! empty( $changes ) ? 'updated' : 'skipped';
             self::log_sync( $rs_product['id'], $wc_product_id, $action, $source, $changes );
-            return array( 'action' => $action, 'wc_product_id' => $wc_product_id, 'changes' => $changes );
+
+            $result = array( 'action' => $action, 'wc_product_id' => $wc_product_id, 'changes' => $changes );
+            if ( isset( $changes['description'] ) ) {
+                // OpenAI rewrite is deferred to sync_product() so the slow
+                // model call does not hold the per-product lock open.
+                $result['openai_rewrite'] = true;
+            }
+            return $result;
         }
 
         // Do not attempt a create when an unrelated product already has this
@@ -157,6 +185,20 @@ class WOO_RS_Product_Sync {
             return array( 'action' => 'error', 'wc_product_id' => $conflict_id, 'error' => $error );
         }
 
+        // A linked product may exist only in the trash: the status-aware
+        // lookups above exclude it. Never silently create a fresh published
+        // duplicate — leave the trashed product as-is until an administrator
+        // restores or unlinks it.
+        $trashed_id = self::find_linked_product_any_status( $rs_product['id'] );
+        if ( $trashed_id ) {
+            $trashed_status = get_post_status( $trashed_id );
+            self::log_sync( $rs_product['id'], $trashed_id, 'skipped', $source, array(
+                'reason' => 'linked_product_trashed',
+                'status' => $trashed_status,
+            ) );
+            return array( 'action' => 'skipped', 'wc_product_id' => $trashed_id, 'reason' => 'linked_product_trashed', 'status' => $trashed_status );
+        }
+
         $new_id = self::create_product( $rs_product );
         if ( is_wp_error( $new_id ) ) {
             self::log_sync(
@@ -167,11 +209,13 @@ class WOO_RS_Product_Sync {
         }
         $changes = array( 'created' => true );
 
-        // OpenAI description rewrite for new products
-        self::maybe_openai_rewrite( $new_id, $rs_product );
-
         self::log_sync( $rs_product['id'], $new_id, 'created', $source, $changes );
-        return array( 'action' => 'created', 'wc_product_id' => $new_id, 'changes' => $changes );
+        return array(
+            'action'         => 'created',
+            'wc_product_id'  => $new_id,
+            'changes'        => $changes,
+            'openai_rewrite' => true,
+        );
     }
 
     /**
@@ -201,8 +245,38 @@ class WOO_RS_Product_Sync {
         // Fallback: meta query
         global $wpdb;
         $product_id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_rs_product_id' AND meta_value = %s LIMIT 1",
+            "SELECT postmeta.post_id
+             FROM {$wpdb->postmeta} AS postmeta
+             INNER JOIN {$wpdb->posts} AS posts ON posts.ID = postmeta.post_id
+             WHERE postmeta.meta_key = '_rs_product_id'
+               AND postmeta.meta_value = %s
+               AND posts.post_type IN ('product', 'product_variation')
+               AND posts.post_status NOT IN ('trash', 'auto-draft')
+             ORDER BY posts.ID ASC
+             LIMIT 1",
             $sku_string
+        ) );
+
+        return $product_id ? (int) $product_id : 0;
+    }
+
+    /**
+     * Find a WC product linked to this RS product regardless of post status.
+     * Used to detect linked products that were moved to the trash so the sync
+     * can skip instead of creating a duplicate.
+     */
+    private static function find_linked_product_any_status( $rs_product_id ) {
+        global $wpdb;
+        $product_id = $wpdb->get_var( $wpdb->prepare(
+            "SELECT postmeta.post_id
+             FROM {$wpdb->postmeta} AS postmeta
+             INNER JOIN {$wpdb->posts} AS posts ON posts.ID = postmeta.post_id
+             WHERE postmeta.meta_key = '_rs_product_id'
+               AND postmeta.meta_value = %s
+               AND posts.post_type IN ('product', 'product_variation')
+             ORDER BY posts.ID ASC
+             LIMIT 1",
+            (string) $rs_product_id
         ) );
 
         return $product_id ? (int) $product_id : 0;
@@ -345,7 +419,12 @@ class WOO_RS_Product_Sync {
     private static function update_product( $wc_product_id, $rs_product ) {
         $product = wc_get_product( $wc_product_id );
         if ( ! $product ) {
-            return array();
+            // Product deleted/trashed between find_wc_product() and the write.
+            // Surface as an error so the caller logs it instead of a healthy skip.
+            return new WP_Error(
+                'wc_product_not_found',
+                sprintf( __( 'WooCommerce product #%d no longer exists.', 'woo-rs-product-sync' ), (int) $wc_product_id )
+            );
         }
 
         $is_variation = $product->is_type( 'variation' );
@@ -559,6 +638,10 @@ class WOO_RS_Product_Sync {
     /**
      * Assign WC categories to a product based on the category map.
      *
+     * When an existing product moves to an unmapped or empty category, the
+     * previously-mapped WC terms are removed (manual ones are preserved) so a
+     * re-categorized product never keeps stale mapped categories forever.
+     *
      * @param int   $product_id  WC product ID.
      * @param array $rs_product  RS product data.
      * @param bool  $is_new      True when called during product creation (skips merge to avoid
@@ -566,23 +649,27 @@ class WOO_RS_Product_Sync {
      */
     private static function assign_wc_categories( $product_id, $rs_product, $is_new = false, $prev_rs_category = null ) {
         $rs_category = isset( $rs_product['product_category'] ) ? $rs_product['product_category'] : '';
-        if ( empty( $rs_category ) ) {
-            return;
-        }
+        $map         = get_option( 'woo_rs_product_sync_category_map', array() );
 
-        $map = get_option( 'woo_rs_product_sync_category_map', array() );
-        if ( ! isset( $map[ $rs_category ] ) || empty( $map[ $rs_category ] ) ) {
-            return;
+        $mapped_ids = array();
+        if ( '' !== (string) $rs_category && isset( $map[ $rs_category ] ) && ! empty( $map[ $rs_category ] ) ) {
+            $mapped_ids = array_map( 'intval', (array) $map[ $rs_category ] );
         }
-
-        $mapped_ids = array_map( 'intval', (array) $map[ $rs_category ] );
 
         if ( $is_new ) {
+            // New products in unmapped categories never reach here (the category
+            // gate skips them). Keep WC's default "Uncategorized" assignment on
+            // create — do not strip it for an unmapped category.
+            if ( empty( $mapped_ids ) ) {
+                return;
+            }
             // On create, WC auto-assigns the default "Uncategorized" category before this runs.
             // Do not merge — just set the mapped IDs directly.
             $merged_ids = $mapped_ids;
         } else {
             // Merge with existing WC categories to preserve any manually assigned ones.
+            // When the product moved to an unmapped/empty category, $mapped_ids is
+            // empty, so the old mapped terms are dropped while manual ones stay.
             $existing_ids = wp_get_object_terms( $product_id, 'product_cat', array( 'fields' => 'ids' ) );
             if ( ! is_wp_error( $existing_ids ) && ! empty( $existing_ids ) ) {
                 // wp_get_object_terms can return string IDs depending on WP version;
@@ -656,6 +743,17 @@ class WOO_RS_Product_Sync {
     /**
      * Optionally rewrite a product's description via OpenAI.
      * Logs its own sync log entry with source 'openai'.
+     *
+     * Runs after sync_product() releases the per-product lock so slow model
+     * calls never block concurrent webhook/cron workers on the same product.
+     *
+     * Failure handling:
+     *   - A thrown exception (network, WC save) is contained here so it can
+     *     never abort the cron loop.
+     *   - A failed or throttled rewrite leaves the product marked pending
+     *     (_rs_openai_rewrite_pending) so sync_product() retries it on a later
+     *     sync — otherwise the next run would see _rs_description_raw matching
+     *     and silently skip the rewrite forever.
      */
     private static function maybe_openai_rewrite( $wc_product_id, $rs_product ) {
         if ( ! WOO_RS_OpenAI::is_enabled() ) {
@@ -664,12 +762,46 @@ class WOO_RS_Product_Sync {
 
         $rs_description = isset( $rs_product['description'] ) ? $rs_product['description'] : '';
         $product_name   = isset( $rs_product['name'] ) ? $rs_product['name'] : '';
-        $rs_product_id  = $rs_product['id'];
+        $rs_product_id  = isset( $rs_product['id'] ) ? $rs_product['id'] : 0;
 
-        $result = WOO_RS_OpenAI::maybe_rewrite_product_description( $wc_product_id, $rs_description, $product_name );
+        try {
+            $result = WOO_RS_OpenAI::maybe_rewrite_product_description( $wc_product_id, $rs_description, $product_name );
+        } catch ( \Throwable $e ) {
+            update_post_meta( $wc_product_id, '_rs_openai_rewrite_pending', '1' );
+            self::log_sync( $rs_product_id, $wc_product_id, 'error', 'openai', array( 'exception' => $e->getMessage() ), 'openai_exception', $e->getMessage() );
+            return;
+        }
 
-        $action = ! empty( $result['rewritten'] ) ? 'updated' : 'skipped';
-        self::log_sync( $rs_product_id, $wc_product_id, $action, 'openai', $result );
+        if ( ! empty( $result['rewritten'] ) ) {
+            delete_post_meta( $wc_product_id, '_rs_openai_rewrite_pending' );
+            update_post_meta( $wc_product_id, '_rs_openai_rewritten_at', time() );
+            self::log_sync( $rs_product_id, $wc_product_id, 'updated', 'openai', $result );
+            return;
+        }
+
+        $reason = isset( $result['reason'] ) ? (string) $result['reason'] : 'unknown';
+
+        // Throttled rewrites are logged as skips (silenced at 'changes_only'
+        // level) and keep their pending marker so a later sync retries them.
+        if ( 'throttled' === $reason ) {
+            update_post_meta( $wc_product_id, '_rs_openai_rewrite_pending', '1' );
+            self::log_sync( $rs_product_id, $wc_product_id, 'skipped', 'openai', $result );
+            return;
+        }
+
+        // A failed rewrite must not look like a durable skip: mark it pending
+        // and log an error row so it is retried on the next sync. A vanished
+        // product is excluded — retrying it can't succeed, and the marker would
+        // otherwise linger on orphaned postmeta.
+        if ( in_array( $reason, array( 'api_error', 'save_failed', 'unknown' ), true ) ) {
+            update_post_meta( $wc_product_id, '_rs_openai_rewrite_pending', '1' );
+            self::log_sync( $rs_product_id, $wc_product_id, 'error', 'openai', array(), $reason, isset( $result['error'] ) ? (string) $result['error'] : '' );
+            return;
+        }
+
+        // 'empty_description' / 'disabled' / 'product_not_found': nothing to
+        // rewrite, no retry.
+        self::log_sync( $rs_product_id, $wc_product_id, 'skipped', 'openai', $result );
     }
 
     /**
@@ -727,7 +859,7 @@ class WOO_RS_Product_Sync {
      */
     public static function get_sync_logs( $limit = 50, $offset = 0 ) {
         global $wpdb;
-        $table = $wpdb->prefix . WOO_RS_SYNC_LOG_TABLE;
+        $table = WOO_RS_DB::table( 'sync_log' );
 
         return $wpdb->get_results( $wpdb->prepare(
             "SELECT * FROM {$table} ORDER BY synced_at DESC LIMIT %d OFFSET %d",

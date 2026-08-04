@@ -8,6 +8,7 @@ jQuery(document).ready(function ($) {
     var totalUpdated   = 0;
     var totalSkipped   = 0;
     var totalMatched   = 0;
+    var totalErrors    = 0;
     var skippedConflictProductIds = {};
     var autoMatchSkuConflicts = false;
     var currentSyncPage = 1;
@@ -216,6 +217,7 @@ jQuery(document).ready(function ($) {
         totalUpdated   = 0;
         totalSkipped   = 0;
         totalMatched   = 0;
+        totalErrors    = 0;
         skippedConflictProductIds = {};
         autoMatchSkuConflicts = false;
 
@@ -271,6 +273,7 @@ jQuery(document).ready(function ($) {
                 totalUpdated   += data.stats.updated;
                 totalSkipped   += data.stats.skipped;
                 totalMatched   += data.stats.matched || 0;
+                totalErrors    += data.stats.error || 0;
 
                 // Update status text
                 $('#woo-rs-sync-status').text(
@@ -278,7 +281,8 @@ jQuery(document).ready(function ($) {
                     totalCreated + ' created, ' +
                     totalUpdated + ' updated, ' +
                     totalSkipped + ' skipped' +
-                    (totalMatched ? ', ' + totalMatched + ' matched' : '')
+                    (totalMatched ? ', ' + totalMatched + ' matched' : '') +
+                    (totalErrors ? ', ' + totalErrors + ' errors' : '')
                 );
 
                 if (data.more && data.next_page) {
@@ -294,7 +298,8 @@ jQuery(document).ready(function ($) {
                         totalCreated + ' created, ' +
                         totalUpdated + ' updated, ' +
                         totalSkipped + ' skipped' +
-                        (totalMatched ? ', ' + totalMatched + ' matched' : '')
+                        (totalMatched ? ', ' + totalMatched + ' matched' : '') +
+                        (totalErrors ? ', ' + totalErrors + ' errors' : '')
                     );
                     syncInProgress = false;
                     $('#woo-rs-start-sync').prop('disabled', false);

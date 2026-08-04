@@ -159,8 +159,17 @@ class WOO_RS_Plugin {
         $old_table = $wpdb->prefix . 'df_rs_webhook_log';
         $old_exists = $wpdb->get_var( "SHOW TABLES LIKE '{$old_table}'" );
         if ( $old_exists ) {
-            $wpdb->query( "INSERT IGNORE INTO {$new_table} SELECT * FROM {$old_table}" );
-            $wpdb->query( "DROP TABLE {$old_table}" );
+            // SELECT * copies by column position, so a drifted old schema would
+            // silently garble or drop rows under INSERT IGNORE. Only copy and
+            // drop when the column sets match exactly; otherwise leave the old
+            // table in place so no data is lost.
+            if ( self::tables_compatible( $old_table, $new_table ) ) {
+                $wpdb->query( "INSERT IGNORE INTO {$new_table} SELECT * FROM {$old_table}" );
+                $wpdb->query( "DROP TABLE {$old_table}" );
+            } else {
+                // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+                error_log( 'Woo RS Product Sync: legacy table ' . $old_table . ' has a different schema than ' . $new_table . '; leaving it in place to avoid data loss.' );
+            }
         }
 
         // Migrate API key from df_rs_ prefix
@@ -178,5 +187,31 @@ class WOO_RS_Plugin {
         }
         delete_option( 'woo_rs_sync_api_key' );
         delete_option( 'woo_rs_sync_db_version' );
+    }
+
+    /**
+     * True when two tables have identical column names in the same order.
+     * Legacy migrations copy rows with SELECT * (positional), so anything less
+     * than an exact match can corrupt or silently drop data.
+     *
+     * @param string $table_a
+     * @param string $table_b
+     * @return bool
+     */
+    private static function tables_compatible( $table_a, $table_b ) {
+        return self::table_columns( $table_a ) === self::table_columns( $table_b );
+    }
+
+    /**
+     * Ordered list of column names for a table.
+     *
+     * @param string $table
+     * @return string[]
+     */
+    private static function table_columns( $table ) {
+        global $wpdb;
+        // Table names come from plugin constants/known prefixes; never user input.
+        $columns = $wpdb->get_col( "SHOW COLUMNS FROM `{$table}`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery
+        return is_array( $columns ) ? $columns : array();
     }
 }

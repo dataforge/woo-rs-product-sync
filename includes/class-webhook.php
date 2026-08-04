@@ -76,6 +76,9 @@ class WOO_RS_Webhook {
 
     /**
      * Handle incoming webhook request: log it, sync the product, and return 200.
+     * Malformed deliveries (non-JSON body or missing product id) are logged as
+     * error rows and answered with a 4xx so RepairShopr can retry instead of
+     * silently dropping the event.
      */
     public static function handle( WP_REST_Request $request ) {
         $headers = $request->get_headers();
@@ -88,25 +91,69 @@ class WOO_RS_Webhook {
 
         $data = json_decode( $body, true );
 
-        if ( is_array( $data ) ) {
-            // RS webhooks wrap product data under "attributes".
-            $rs_product = isset( $data['attributes'] ) && is_array( $data['attributes'] ) ? $data['attributes'] : $data;
+        if ( ! is_array( $data ) ) {
+            WOO_RS_Product_Sync::log_sync( 0, 0, 'error', 'webhook', array(), 'malformed_payload', 'Webhook body is not valid JSON.' );
+            return new WP_REST_Response( array(
+                'success' => false,
+                'message' => 'Invalid JSON payload.',
+            ), 400 );
+        }
 
-            if ( ! empty( $rs_product['id'] ) ) {
-                try {
-                    WOO_RS_Product_Sync::sync_product( $rs_product, 'webhook' );
-                } catch ( \WC_Data_Exception $e ) {
-                    WOO_RS_Product_Sync::log_sync( (int) $rs_product['id'], 0, 'error', 'webhook', array( 'exception' => $e->getMessage() ) );
-                } catch ( \RuntimeException $e ) {
-                    WOO_RS_Product_Sync::log_sync( (int) $rs_product['id'], 0, 'error', 'webhook', array( 'exception' => $e->getMessage() ) );
-                }
-            }
+        // RS webhooks wrap product data under "attributes".
+        $rs_product = isset( $data['attributes'] ) && is_array( $data['attributes'] ) ? $data['attributes'] : $data;
+
+        if ( empty( $rs_product['id'] ) ) {
+            WOO_RS_Product_Sync::log_sync( 0, 0, 'error', 'webhook', array(), 'missing_product_id', 'Webhook payload has no product id.' );
+            return new WP_REST_Response( array(
+                'success' => false,
+                'message' => 'Missing product id.',
+            ), 400 );
+        }
+
+        try {
+            $result = WOO_RS_Product_Sync::sync_product( $rs_product, 'webhook' );
+        } catch ( \Throwable $e ) {
+            WOO_RS_Product_Sync::log_sync( (int) $rs_product['id'], 0, 'error', 'webhook', array( 'exception' => $e->getMessage() ), 'sync_exception', $e->getMessage() );
+            return new WP_REST_Response( array(
+                'success' => false,
+                'message' => 'Webhook processing failed.',
+            ), 500 );
+        }
+
+        // Transient failures get a 5xx so RepairShopr redelivers the event.
+        // Durable business errors (rs_sku_conflict, rs_duplicate_wc_sku) keep
+        // the 200: retrying them would loop forever and an admin must resolve
+        // them on screen anyway.
+        if ( is_array( $result ) && self::is_retryable_failure( $result ) ) {
+            return new WP_REST_Response( array(
+                'success' => false,
+                'message' => 'Webhook sync failed; please retry.',
+            ), 503 );
         }
 
         return new WP_REST_Response( array(
             'success' => true,
             'message' => 'Webhook received.',
         ), 200 );
+    }
+
+    /**
+     * True when a sync result represents a transient failure worth redelivering.
+     * lock_busy is reported as action 'skipped' with reason 'lock_busy' (see
+     * WOO_RS_Product_Sync::sync_product()); save failures arrive as WP_Error
+     * error codes.
+     *
+     * @param array $result Sync result from WOO_RS_Product_Sync::sync_product().
+     * @return bool
+     */
+    private static function is_retryable_failure( $result ) {
+        if ( isset( $result['reason'] ) && 'lock_busy' === $result['reason'] ) {
+            return true;
+        }
+        if ( isset( $result['action'] ) && 'error' === $result['action'] && isset( $result['error'] ) && is_wp_error( $result['error'] ) ) {
+            return in_array( $result['error']->get_error_code(), array( 'wc_save_failed', 'wc_product_not_found', 'lock_busy' ), true );
+        }
+        return false;
     }
 
     /**

@@ -12,7 +12,7 @@ A WordPress/WooCommerce plugin that syncs products from [RepairShopr](https://ww
 - **Detailed sync logging** -- Tracks every sync action (created, updated, skipped) with field-level change details. Configurable logging levels.
 - **Webhook logging** -- Raw webhook payloads are logged for debugging.
 - **Encrypted API key storage** -- Both RepairShopr and OpenAI API keys are encrypted at rest.
-- **Rate limiting** -- Built-in rate limiter for RepairShopr API calls (160 calls per 5 minutes).
+- **Rate limiting** -- Built-in rate limiter for RepairShopr API calls (160 calls per 60 seconds).
 
 ## Requirements
 

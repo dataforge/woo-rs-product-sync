@@ -10,6 +10,11 @@ class WOO_RS_OpenAI {
 
     const DEFAULT_MODEL = 'gpt-5.4-nano';
 
+    /** Fixed-window budget for OpenAI rewrites so a bulk sync can't blow the budget. */
+    const REWRITE_RATE_STATE_OPTION = 'woo_rs_product_sync_openai_rate_state';
+    const REWRITE_INTERVAL_SECONDS  = 60;
+    const REWRITE_LOCK_KEY          = 'openai_rewrite_rate';
+
     /**
      * Per-model settings: reasoning models need higher token limits,
      * longer timeouts, and don't support temperature.
@@ -149,22 +154,92 @@ class WOO_RS_OpenAI {
     }
 
     /**
-     * Rewrite a product description using OpenAI.
+     * Consume one rewrite slot from the fixed-window rate limiter.
      *
-     * @param string $description    The original RS product description.
-     * @param string $product_name   The product name (for context).
-     * @return array Result array with 'text' (rewritten) or 'error', plus 'log' when logging enabled.
+     * Caps how many OpenAI calls a full sync (or a burst of webhooks) can issue
+     * per interval, so a first sync after enabling the feature cannot rewrite
+     * the entire catalog (and cost) in one pass. The cap is configurable via
+     * the woo_rs_product_sync_openai_max_rewrites option (0 disables it).
+     *
+     * @return true|WP_Error retryable WP_Error when the window is exhausted.
      */
-    public static function rewrite_description( $description, $product_name = '' ) {
+    private static function consume_rewrite_slot() {
+        $max = (int) get_option( 'woo_rs_product_sync_openai_max_rewrites', 25 );
+        if ( $max <= 0 ) {
+            return true;
+        }
+
+        $token = WOO_RS_Locks::acquire_blocking( self::REWRITE_LOCK_KEY, 10 );
+        if ( false === $token ) {
+            return new WP_Error(
+                'openai_rewrite_throttled',
+                'OpenAI rewrite limiter is busy; retry shortly.',
+                array( 'retry_after' => 1 )
+            );
+        }
+
+        try {
+            $now   = time();
+            $state = get_option( self::REWRITE_RATE_STATE_OPTION, array() );
+            $state = is_array( $state ) ? $state : array();
+            $start = isset( $state['start'] ) ? (int) $state['start'] : 0;
+            $count = isset( $state['count'] ) ? (int) $state['count'] : 0;
+
+            if ( $start <= 0 || ( $now - $start ) >= self::REWRITE_INTERVAL_SECONDS ) {
+                $start = $now;
+                $count = 0;
+            }
+
+            if ( $count >= $max ) {
+                return new WP_Error(
+                    'openai_rewrite_throttled',
+                    'OpenAI rewrite rate limit reached.',
+                    array( 'retry_after' => max( 1, self::REWRITE_INTERVAL_SECONDS - ( $now - $start ) ) )
+                );
+            }
+
+            update_option( self::REWRITE_RATE_STATE_OPTION, array(
+                'start' => $start,
+                'count' => $count + 1,
+            ), false );
+            return true;
+        } finally {
+            WOO_RS_Locks::release( self::REWRITE_LOCK_KEY, $token );
+        }
+    }
+
+    /**
+     * Run one Chat Completions request and normalize the response.
+     *
+     * Shared by the production rewrite path (rewrite_description) and the admin
+     * test tool (WOO_RS_Admin::ajax_test_openai) so the two cannot drift again.
+     * Never throws: network and API errors are folded into the result array.
+     * The 'log' key is populated only when request/response logging is enabled.
+     *
+     * @param string $description  The original RS product description.
+     * @param string $product_name The product name (for context).
+     * @return array {
+     *   'text'          string|null Rewritten text (null on failure).
+     *   'error'         string|null Error message (null on success).
+     *   'model'         string      Model that actually answered.
+     *   'usage'         array|null  Token usage.
+     *   'finish_reason' string|null
+     *   'http_status'   int|null
+     *   'log'           array|null  Request/response capture when logging is on.
+     * }
+     */
+    public static function request_rewrite( $description, $product_name = '' ) {
         $logging = self::is_logging_enabled();
 
+        $base = array( 'text' => null, 'error' => null, 'model' => self::get_model(), 'usage' => null, 'finish_reason' => null, 'http_status' => null, 'log' => null );
+
         if ( empty( trim( $description ) ) ) {
-            return array( 'text' => $description, 'error' => null );
+            return array_merge( $base, array( 'text' => $description ) );
         }
 
         $api_key = self::get_api_key();
         if ( empty( $api_key ) ) {
-            return array( 'text' => null, 'error' => 'OpenAI API key not configured.' );
+            return array_merge( $base, array( 'error' => 'OpenAI API key not configured.' ) );
         }
 
         $prompt = self::get_prompt();
@@ -188,42 +263,41 @@ class WOO_RS_OpenAI {
         ) );
 
         if ( is_wp_error( $response ) ) {
-            $result = array( 'text' => null, 'error' => $response->get_error_message() );
-            if ( $logging ) {
-                $result['log'] = array(
+            return array_merge( $base, array(
+                'error' => $response->get_error_message(),
+                'log'   => $logging ? array(
                     'request'  => $request_body,
                     'response' => $response->get_error_message(),
-                );
-            }
-            return $result;
+                ) : null,
+            ) );
         }
 
         $status_code   = wp_remote_retrieve_response_code( $response );
         $response_body = json_decode( wp_remote_retrieve_body( $response ), true );
 
         if ( ! is_array( $response_body ) ) {
-            $result = array( 'text' => null, 'error' => 'OpenAI returned an unparseable response (HTTP ' . $status_code . ').' );
-            if ( $logging ) {
-                $result['log'] = array(
+            return array_merge( $base, array(
+                'error'       => 'OpenAI returned an unparseable response (HTTP ' . $status_code . ').',
+                'http_status' => $status_code,
+                'log'         => $logging ? array(
                     'request'     => $request_body,
                     'http_status' => $status_code,
                     'response'    => wp_remote_retrieve_body( $response ),
-                );
-            }
-            return $result;
+                ) : null,
+            ) );
         }
 
         if ( $status_code !== 200 ) {
             $error_msg = isset( $response_body['error']['message'] ) ? $response_body['error']['message'] : "HTTP {$status_code}";
-            $result = array( 'text' => null, 'error' => $error_msg );
-            if ( $logging ) {
-                $result['log'] = array(
-                    'request'       => $request_body,
-                    'http_status'   => $status_code,
-                    'response'      => $response_body,
-                );
-            }
-            return $result;
+            return array_merge( $base, array(
+                'error'       => $error_msg,
+                'http_status' => $status_code,
+                'log'         => $logging ? array(
+                    'request'     => $request_body,
+                    'http_status' => $status_code,
+                    'response'    => $response_body,
+                ) : null,
+            ) );
         }
 
         // Extract output — try Chat Completions format, then Responses API format.
@@ -249,32 +323,53 @@ class WOO_RS_OpenAI {
             $error_msg = 'length' === $finish
                 ? 'OpenAI used all tokens for reasoning with none left for output. Try a smaller model like gpt-5.4-nano.'
                 : 'OpenAI returned an empty response.';
-            $result = array( 'text' => null, 'error' => $error_msg );
-            if ( $logging ) {
-                $result['log'] = array(
+            return array_merge( $base, array(
+                'error'         => $error_msg,
+                'finish_reason' => $finish,
+                'http_status'   => $status_code,
+                'log'           => $logging ? array(
                     'request'  => $request_body,
                     'response' => $response_body,
-                );
-            }
-            return $result;
+                ) : null,
+            ) );
         }
 
-        $rewritten = $output_text;
+        $usage     = isset( $response_body['usage'] ) ? $response_body['usage'] : null;
+        $used_model = isset( $response_body['model'] ) ? $response_body['model'] : $model;
 
-        $result = array( 'text' => $rewritten, 'error' => null );
-        if ( $logging ) {
-            $usage = isset( $response_body['usage'] ) ? $response_body['usage'] : null;
-            $result['log'] = array(
+        return array_merge( $base, array(
+            'text'          => $output_text,
+            'model'         => $used_model,
+            'usage'         => $usage,
+            'finish_reason' => isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : null,
+            'http_status'   => $status_code,
+            'log'           => $logging ? array(
                 'request'  => $request_body,
                 'response' => array(
-                    'model'         => isset( $response_body['model'] ) ? $response_body['model'] : $model,
-                    'output'        => $rewritten,
+                    'model'         => $used_model,
+                    'output'        => $output_text,
                     'usage'         => $usage,
                     'finish_reason' => isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : null,
                 ),
-            );
+            ) : null,
+        ) );
+    }
+
+    /**
+     * Rewrite a product description using OpenAI.
+     *
+     * @param string $description    The original RS product description.
+     * @param string $product_name   The product name (for context).
+     * @return array Result array with 'text' (rewritten) or 'error', plus 'log' when logging enabled.
+     */
+    public static function rewrite_description( $description, $product_name = '' ) {
+        $result = self::request_rewrite( $description, $product_name );
+
+        $output = array( 'text' => $result['text'], 'error' => $result['error'] );
+        if ( isset( $result['log'] ) ) {
+            $output['log'] = $result['log'];
         }
-        return $result;
+        return $output;
     }
 
     /**
@@ -296,6 +391,16 @@ class WOO_RS_OpenAI {
             return array( 'rewritten' => false, 'reason' => 'empty_description' );
         }
 
+        $slot = self::consume_rewrite_slot();
+        if ( is_wp_error( $slot ) ) {
+            $data = $slot->get_error_data();
+            return array(
+                'rewritten'   => false,
+                'reason'      => 'throttled',
+                'retry_after' => is_array( $data ) && isset( $data['retry_after'] ) ? (int) $data['retry_after'] : 60,
+            );
+        }
+
         $result = self::rewrite_description( $rs_description, $product_name );
 
         if ( ! empty( $result['error'] ) ) {
@@ -312,9 +417,23 @@ class WOO_RS_OpenAI {
 
         // Update the WC product description
         $product = wc_get_product( $product_id );
-        if ( $product ) {
+        if ( ! $product ) {
+            return array(
+                'rewritten' => false,
+                'reason'    => 'product_not_found',
+                'error'     => sprintf( __( 'WooCommerce product #%d no longer exists.', 'woo-rs-product-sync' ), (int) $product_id ),
+            );
+        }
+
+        try {
             $product->set_description( $result['text'] );
             $product->save();
+        } catch ( \Exception $e ) {
+            return array(
+                'rewritten' => false,
+                'reason'    => 'save_failed',
+                'error'     => $e->getMessage(),
+            );
         }
 
         $output = array(

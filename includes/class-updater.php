@@ -217,7 +217,9 @@ class WOO_RS_Updater {
 		$response = wp_remote_get( $url, array(
 			'headers' => array(
 				'Accept'     => 'application/vnd.github.v3+json',
-				'User-Agent' => 'WordPress/' . get_bloginfo( 'version' ) . '; ' . home_url(),
+				// Don't leak the site URL to GitHub in the User-Agent; identify
+				// as the plugin + WP version instead.
+				'User-Agent' => 'WordPress/' . get_bloginfo( 'version' ) . '; Woo-RS-Product-Sync/' . WOO_RS_PRODUCT_SYNC_VERSION,
 			),
 			'timeout' => 10,
 		) );

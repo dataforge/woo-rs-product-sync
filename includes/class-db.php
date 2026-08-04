@@ -94,4 +94,27 @@ class WOO_RS_DB {
             $limit
         ) );
     }
+
+    /**
+     * Delete rows older than $days from a whitelisted table, keyed by $column.
+     * Both tables index their timestamp columns (received_at/synced_at), so
+     * this runs as an index scan. $column is validated like latest_value().
+     *
+     * @param string $key    Table key ('webhook_log' or 'sync_log').
+     * @param string $column Timestamp column to compare against.
+     * @param int    $days   Retention window in days.
+     * @return int Number of rows deleted.
+     */
+    public static function prune( $key, $column, $days ) {
+        global $wpdb;
+        if ( ! preg_match( '/^[a-zA-Z_][a-zA-Z0-9_]*$/', $column ) ) {
+            return 0;
+        }
+        $table  = self::table( $key );
+        $cutoff = gmdate( 'Y-m-d H:i:s', time() - max( 1, (int) $days ) * DAY_IN_SECONDS );
+        return (int) $wpdb->query( $wpdb->prepare(
+            "DELETE FROM `{$table}` WHERE `{$column}` < %s", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+            $cutoff
+        ) );
+    }
 }

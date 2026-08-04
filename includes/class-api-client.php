@@ -171,28 +171,6 @@ class WOO_RS_API_Client {
             : array();
     }
 
-    public static function fetch_all_products( $per_page = 100 ) {
-        $all_products = array();
-        $page         = 1;
-
-        do {
-            $result = self::get( 'products', array(
-                'page'     => $page,
-                'per_page' => $per_page,
-            ) );
-
-            if ( is_wp_error( $result ) ) {
-                return $result;
-            }
-
-            $products     = isset( $result['products'] ) ? $result['products'] : array();
-            $all_products = array_merge( $all_products, $products );
-            $page++;
-        } while ( ! empty( $products ) && $page <= self::MAX_PAGES );
-
-        return $all_products;
-    }
-
     public static function fetch_products_page( $page = 1, $per_page = 0, $category_id = 0 ) {
         // RS ignores per_page — omit it and let the API use its native page size.
         $params = array( 'page' => $page );

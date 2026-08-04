@@ -253,6 +253,12 @@ class WOO_RS_Admin {
             update_option( 'woo_rs_product_sync_openai_model', $model );
         }
 
+        // OpenAI rewrite throttle: max rewrites per 60s window. 0 = unlimited.
+        if ( isset( $_POST['openai_max_rewrites'] ) ) {
+            $max_rewrites = max( 0, (int) $_POST['openai_max_rewrites'] );
+            update_option( 'woo_rs_product_sync_openai_max_rewrites', $max_rewrites );
+        }
+
         $openai_logging = isset( $_POST['openai_logging'] ) ? 1 : 0;
         update_option( 'woo_rs_product_sync_openai_logging', $openai_logging );
 
@@ -313,66 +319,19 @@ class WOO_RS_Admin {
             $user_message = "Product: {$product_name}\n\nDescription:\n{$description}";
         }
 
-        $prompt = WOO_RS_OpenAI::get_prompt();
-        $model  = WOO_RS_OpenAI::get_model();
+        // Shared with the production rewrite path so the test tool and the real
+        // sync can't drift on request/response handling again.
+        $result = WOO_RS_OpenAI::request_rewrite( $description, $product_name );
 
-        $request_body = WOO_RS_OpenAI::build_request_body( $model, $prompt, $user_message );
-        $config       = WOO_RS_OpenAI::get_model_config( $model );
-
-        $response = wp_remote_post( 'https://api.openai.com/v1/chat/completions', array(
-            'timeout' => $config['timeout'],
-            'headers' => array(
-                'Content-Type'  => 'application/json',
-                'Authorization' => 'Bearer ' . $api_key,
-            ),
-            'body' => wp_json_encode( $request_body ),
-        ) );
-
-        if ( is_wp_error( $response ) ) {
-            wp_send_json_error( 'Connection error: ' . $response->get_error_message() );
+        if ( ! empty( $result['error'] ) ) {
+            wp_send_json_error( $result['error'] );
         }
-
-        $status_code   = wp_remote_retrieve_response_code( $response );
-        $response_body = json_decode( wp_remote_retrieve_body( $response ), true );
-
-        if ( $status_code !== 200 ) {
-            $error_msg = isset( $response_body['error']['message'] ) ? $response_body['error']['message'] : 'HTTP ' . $status_code;
-            wp_send_json_error( 'API error: ' . $error_msg );
-        }
-
-        // Extract output — try chat completions format, then responses API format
-        $output_text = '';
-        if ( ! empty( $response_body['choices'][0]['message']['content'] ) ) {
-            $output_text = trim( $response_body['choices'][0]['message']['content'] );
-        } elseif ( ! empty( $response_body['output'] ) ) {
-            // Responses API format: output[].content[].text
-            foreach ( $response_body['output'] as $output_item ) {
-                if ( isset( $output_item['content'] ) ) {
-                    foreach ( $output_item['content'] as $content_block ) {
-                        if ( isset( $content_block['text'] ) ) {
-                            $output_text .= $content_block['text'];
-                        }
-                    }
-                }
-            }
-            $output_text = trim( $output_text );
-        }
-
-        if ( empty( $output_text ) ) {
-            $finish = isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : 'unknown';
-            if ( 'length' === $finish ) {
-                wp_send_json_error( 'OpenAI used all tokens for reasoning with none left for output. Try a smaller model like gpt-5.4-nano.' );
-            }
-            wp_send_json_error( 'OpenAI returned an empty response.' );
-        }
-        $usage       = isset( $response_body['usage'] ) ? $response_body['usage'] : null;
-        $used_model  = isset( $response_body['model'] ) ? $response_body['model'] : $model;
 
         wp_send_json_success( array(
-            'model'  => $used_model,
+            'model'  => $result['model'],
             'input'  => $user_message,
-            'output' => $output_text,
-            'usage'  => $usage,
+            'output' => $result['text'],
+            'usage'  => $result['usage'],
         ) );
     }
 
@@ -492,11 +451,16 @@ class WOO_RS_Admin {
                     <td>
                         <?php if ( ! empty( $last_cron_run['time'] ) ) : ?>
                             <?php echo esc_html( $last_cron_run['time'] ); ?> UTC
-                            <?php if ( ! empty( $last_cron_run['stats'] ) ) : ?>
-                                (<?php echo esc_html( $last_cron_run['stats']['created'] ); ?> created,
-                                 <?php echo esc_html( $last_cron_run['stats']['updated'] ); ?> updated,
-                                 <?php echo esc_html( $last_cron_run['stats']['skipped'] ); ?> skipped)
-                            <?php endif; ?>
+                            <?php
+                            if ( ! empty( $last_cron_run['stats'] ) && is_array( $last_cron_run['stats'] ) ) {
+                                $stats = wp_parse_args( $last_cron_run['stats'], array( 'created' => 0, 'updated' => 0, 'skipped' => 0, 'error' => 0 ) );
+                                echo ' (' . esc_html( (int) $stats['created'] ) . ' created, '
+                                    . esc_html( (int) $stats['updated'] ) . ' updated, '
+                                    . esc_html( (int) $stats['skipped'] ) . ' skipped'
+                                    . ( ! empty( $stats['error'] ) ? ', <strong>' . esc_html( (int) $stats['error'] ) . ' errors</strong>' : '' )
+                                    . ')';
+                            }
+                            ?>
                         <?php else : ?>
                             <em>Never</em>
                         <?php endif; ?>
@@ -588,6 +552,7 @@ class WOO_RS_Admin {
         $openai_key_decrypted    = ! empty( $openai_key_encrypted ) ? WOO_RS_Encryption::decrypt( $openai_key_encrypted ) : '';
         $openai_masked_key       = self::mask_key( $openai_key_decrypted );
         $openai_model            = get_option( 'woo_rs_product_sync_openai_model', WOO_RS_OpenAI::DEFAULT_MODEL );
+        $openai_max_rewrites     = get_option( 'woo_rs_product_sync_openai_max_rewrites', 25 );
         $openai_prompt           = get_option( 'woo_rs_product_sync_openai_prompt', '' );
         $openai_prompt_display   = ! empty( $openai_prompt ) ? $openai_prompt : WOO_RS_OpenAI::DEFAULT_PROMPT;
         $openai_logging          = get_option( 'woo_rs_product_sync_openai_logging', 0 );
@@ -727,6 +692,18 @@ class WOO_RS_Admin {
                         </td>
                     </tr>
                     <tr>
+                        <th scope="row"><label for="openai_max_rewrites">Max Rewrites per Minute</label></th>
+                        <td>
+                            <input type="number" id="openai_max_rewrites" name="openai_max_rewrites" min="0" step="1"
+                                   value="<?php echo esc_attr( $openai_max_rewrites ); ?>" />
+                            <p class="description">
+                                Maximum OpenAI calls per 60 seconds across all sync sources. This caps the cost of a first full
+                                sync after enabling rewriting. Failed or throttled rewrites are retried on later syncs.
+                                Enter 0 to disable the limit.
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
                         <th scope="row"><label for="openai_prompt">Prompt</label></th>
                         <td>
                             <textarea id="openai_prompt" name="openai_prompt" rows="6" class="large-text"><?php echo esc_textarea( $openai_prompt_display ); ?></textarea>
@@ -802,6 +779,7 @@ class WOO_RS_Admin {
                             <th>WC Product</th>
                             <th>Action</th>
                             <th>Source</th>
+                            <th>Error</th>
                             <th>Changes</th>
                         </tr>
                     </thead>
@@ -825,6 +803,16 @@ class WOO_RS_Admin {
                                     </span>
                                 </td>
                                 <td><?php echo esc_html( ucfirst( $log->source ) ); ?></td>
+                                <td>
+                                    <?php if ( ! empty( $log->error_message ) ) : ?>
+                                        <details>
+                                            <summary><?php echo esc_html( ! empty( $log->error_code ) ? $log->error_code : __( 'Error', 'woo-rs-product-sync' ) ); ?></summary>
+                                            <pre class="woo-rs-payload"><?php echo esc_html( $log->error_message ); ?></pre>
+                                        </details>
+                                    <?php else : ?>
+                                        &mdash;
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <?php if ( ! empty( $log->changes ) ) : ?>
                                         <details>
