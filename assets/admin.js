@@ -458,7 +458,9 @@ jQuery(document).ready(function ($) {
                         '<strong>Success!</strong> Model: <code>' + $('<span>').text(d.model).html() + '</code>';
 
                     if (d.usage) {
-                        html += ' &mdash; Tokens: ' + d.usage.prompt_tokens + ' in / ' + d.usage.completion_tokens + ' out';
+                        var inTokens  = d.usage.input_tokens != null ? d.usage.input_tokens : d.usage.prompt_tokens;
+                        var outTokens = d.usage.output_tokens != null ? d.usage.output_tokens : d.usage.completion_tokens;
+                        html += ' &mdash; Tokens: ' + inTokens + ' in / ' + outTokens + ' out';
                     }
 
                     html += '</div>';

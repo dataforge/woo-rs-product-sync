@@ -310,8 +310,7 @@ class WOO_RS_Admin {
         $description  = isset( $_POST['description'] ) ? sanitize_textarea_field( wp_unslash( $_POST['description'] ) ) : '';
 
         if ( empty( trim( $description ) ) ) {
-            $product_name = 'Widget Pro 3000';
-            $description  = 'This is a great widget. It does many things. Very useful for fixing stuff. Comes in blue.';
+            wp_send_json_error( 'Enter a product description to test with.' );
         }
 
         $user_message = $description;
