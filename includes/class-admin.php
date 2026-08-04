@@ -684,10 +684,9 @@ class WOO_RS_Admin {
                         <th scope="row"><label for="openai_model">Model</label></th>
                         <td>
                             <select id="openai_model" name="openai_model">
-                                <option value="gpt-5.4-nano" <?php selected( $openai_model, 'gpt-5.4-nano' ); ?>>GPT-5.4 Nano (fastest, cheapest)</option>
-                                <option value="gpt-5.4-mini" <?php selected( $openai_model, 'gpt-5.4-mini' ); ?>>GPT-5.4 Mini (fast, cost-efficient)</option>
-                                <option value="gpt-5.4" <?php selected( $openai_model, 'gpt-5.4' ); ?>>GPT-5.4 (flagship)</option>
-                                <option value="gpt-5-pro" <?php selected( $openai_model, 'gpt-5-pro' ); ?>>GPT-5 Pro (most capable)</option>
+                                <option value="gpt-5.6-luna" <?php selected( $openai_model, 'gpt-5.6-luna' ); ?>>GPT-5.6 Luna (cheapest, high-volume)</option>
+                                <option value="gpt-5.6-terra" <?php selected( $openai_model, 'gpt-5.6-terra' ); ?>>GPT-5.6 Terra (balanced price/performance)</option>
+                                <option value="gpt-5.6-sol" <?php selected( $openai_model, 'gpt-5.6-sol' ); ?>>GPT-5.6 Sol (flagship, most capable)</option>
                             </select>
                         </td>
                     </tr>

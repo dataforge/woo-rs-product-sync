@@ -8,7 +8,7 @@ class WOO_RS_OpenAI {
 
     const DEFAULT_PROMPT = 'You are a product description writer for an e-commerce store. Rewrite the following product description to be clear, professional, and optimized for online sales. Keep it concise and highlight key features and benefits. Return only the rewritten description with no preamble or extra commentary.';
 
-    const DEFAULT_MODEL = 'gpt-5.4-nano';
+    const DEFAULT_MODEL = 'gpt-5.6-luna';
 
     /** Fixed-window budget for OpenAI rewrites so a bulk sync can't blow the budget. */
     const REWRITE_RATE_STATE_OPTION = 'woo_rs_product_sync_openai_rate_state';
@@ -20,10 +20,9 @@ class WOO_RS_OpenAI {
      * longer timeouts, and don't support temperature.
      */
     private static $model_config = array(
-        'gpt-5.4-nano' => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 60  ),
-        'gpt-5.4-mini' => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 90  ),
-        'gpt-5.4'      => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 120 ),
-        'gpt-5-pro'    => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 180 ),
+        'gpt-5.6-luna' => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 60  ),
+        'gpt-5.6-terra' => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 90  ),
+        'gpt-5.6-sol'  => array( 'reasoning' => true,  'max_tokens' => 16384, 'timeout' => 120 ),
     );
 
     /**
@@ -33,18 +32,25 @@ class WOO_RS_OpenAI {
      * for existing installs the next time the plugin loads.
      */
     private static $model_aliases = array(
-        'gpt-5-nano' => 'gpt-5.4-nano',
-        'gpt-5-mini' => 'gpt-5.4-mini',
-        'gpt-5'      => 'gpt-5.4',
-        'gpt-5.2'    => 'gpt-5.4',
-        'gpt-4.1'    => 'gpt-5.4-mini',
+        'gpt-5-nano'   => 'gpt-5.6-luna',
+        'gpt-5-mini'   => 'gpt-5.6-luna',
+        'gpt-5'        => 'gpt-5.6-terra',
+        'gpt-5.2'      => 'gpt-5.6-terra',
+        'gpt-4.1'      => 'gpt-5.6-terra',
+        'gpt-5.4-nano' => 'gpt-5.6-luna',
+        'gpt-5.4-mini' => 'gpt-5.6-luna',
+        'gpt-5.4'      => 'gpt-5.6-terra',
+        'gpt-5.4-pro'  => 'gpt-5.6-sol',
+        'gpt-5-pro'    => 'gpt-5.6-sol',
+        'gpt-5.5'      => 'gpt-5.6-terra',
+        'gpt-5.5-pro'  => 'gpt-5.6-sol',
     );
 
     /**
      * Bump whenever $model_aliases changes so migrate_models() runs once
      * per install for the new mapping.
      */
-    const MIGRATION_VERSION = 1;
+    const MIGRATION_VERSION = 2;
 
     /**
      * One-shot migration: rewrite the stored model option if it points at a
@@ -81,17 +87,19 @@ class WOO_RS_OpenAI {
 
     /**
      * Build the request body for a given model, prompt, and user message.
+     *
+     * Uses the Responses API request shape (instructions + input) with
+     * max_output_tokens, since these models are reasoning models.
      */
     public static function build_request_body( $model, $prompt, $user_message ) {
         $config = self::get_model_config( $model );
 
         $body = array(
-            'model'    => $model,
-            'messages' => array(
-                array( 'role' => 'system', 'content' => $prompt ),
-                array( 'role' => 'user',   'content' => $user_message ),
-            ),
-            'max_completion_tokens' => $config['max_tokens'],
+            'model'             => $model,
+            'instructions'      => $prompt,
+            'input'             => $user_message,
+            'max_output_tokens' => $config['max_tokens'],
+            'store'             => false,
         );
 
         if ( ! $config['reasoning'] ) {
@@ -209,7 +217,7 @@ class WOO_RS_OpenAI {
     }
 
     /**
-     * Run one Chat Completions request and normalize the response.
+     * Run one Responses API request and normalize the response.
      *
      * Shared by the production rewrite path (rewrite_description) and the admin
      * test tool (WOO_RS_Admin::ajax_test_openai) so the two cannot drift again.
@@ -253,7 +261,7 @@ class WOO_RS_OpenAI {
         $request_body = self::build_request_body( $model, $prompt, $user_message );
         $config       = self::get_model_config( $model );
 
-        $response = wp_remote_post( 'https://api.openai.com/v1/chat/completions', array(
+        $response = wp_remote_post( 'https://api.openai.com/v1/responses', array(
             'timeout' => $config['timeout'],
             'headers' => array(
                 'Content-Type'  => 'application/json',
@@ -300,13 +308,14 @@ class WOO_RS_OpenAI {
             ) );
         }
 
-        // Extract output — try Chat Completions format, then Responses API format.
+        // Extract output — Responses API format first, then Chat Completions format.
         $output_text = '';
-        if ( ! empty( $response_body['choices'][0]['message']['content'] ) ) {
-            $output_text = trim( $response_body['choices'][0]['message']['content'] );
-        } elseif ( ! empty( $response_body['output'] ) && is_array( $response_body['output'] ) ) {
+        if ( ! empty( $response_body['output'] ) && is_array( $response_body['output'] ) ) {
             foreach ( $response_body['output'] as $output_item ) {
-                if ( ! is_array( $output_item ) || ! isset( $output_item['content'] ) || ! is_array( $output_item['content'] ) ) {
+                if ( ! is_array( $output_item ) || 'message' !== ( isset( $output_item['type'] ) ? $output_item['type'] : '' ) ) {
+                    continue;
+                }
+                if ( ! isset( $output_item['content'] ) || ! is_array( $output_item['content'] ) ) {
                     continue;
                 }
                 foreach ( $output_item['content'] as $content_block ) {
@@ -317,11 +326,31 @@ class WOO_RS_OpenAI {
             }
             $output_text = trim( $output_text );
         }
+        if ( empty( $output_text ) && ! empty( $response_body['choices'][0]['message']['content'] ) ) {
+            $output_text = trim( $response_body['choices'][0]['message']['content'] );
+        }
+
+        // Map the Responses API status to the legacy finish_reason terminology used downstream.
+        $finish_reason = null;
+        if ( isset( $response_body['status'] ) ) {
+            if ( 'incomplete' === $response_body['status'] ) {
+                $incomplete_reason = isset( $response_body['incomplete_details']['reason'] ) ? $response_body['incomplete_details']['reason'] : '';
+                $finish_reason = 'max_output_tokens' === $incomplete_reason ? 'length' : 'content_filter';
+            } elseif ( 'completed' === $response_body['status'] ) {
+                $finish_reason = 'stop';
+            } elseif ( 'failed' === $response_body['status'] ) {
+                $finish_reason = 'failed';
+            } else {
+                $finish_reason = 'unknown';
+            }
+        } elseif ( isset( $response_body['choices'][0]['finish_reason'] ) ) {
+            $finish_reason = $response_body['choices'][0]['finish_reason'];
+        }
 
         if ( empty( $output_text ) ) {
-            $finish = isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : 'unknown';
+            $finish = $finish_reason ? $finish_reason : 'unknown';
             $error_msg = 'length' === $finish
-                ? 'OpenAI used all tokens for reasoning with none left for output. Try a smaller model like gpt-5.4-nano.'
+                ? 'OpenAI used all tokens for reasoning with none left for output. Try a smaller model like gpt-5.6-luna.'
                 : 'OpenAI returned an empty response.';
             return array_merge( $base, array(
                 'error'         => $error_msg,
@@ -341,7 +370,7 @@ class WOO_RS_OpenAI {
             'text'          => $output_text,
             'model'         => $used_model,
             'usage'         => $usage,
-            'finish_reason' => isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : null,
+            'finish_reason' => $finish_reason,
             'http_status'   => $status_code,
             'log'           => $logging ? array(
                 'request'  => $request_body,
@@ -349,7 +378,7 @@ class WOO_RS_OpenAI {
                     'model'         => $used_model,
                     'output'        => $output_text,
                     'usage'         => $usage,
-                    'finish_reason' => isset( $response_body['choices'][0]['finish_reason'] ) ? $response_body['choices'][0]['finish_reason'] : null,
+                    'finish_reason' => $finish_reason,
                 ),
             ) : null,
         ) );
