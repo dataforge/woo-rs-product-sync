@@ -490,6 +490,45 @@ jQuery(document).ready(function ($) {
         });
     });
 
+    /* ── Webhook URL: masked display, copy & reveal ── */
+
+    var $urlField = $('.woo-rs-url-field');
+    if ($urlField.length) {
+        var fullUrl   = $urlField.data('full-url');
+        var maskedUrl = $urlField.data('masked-url');
+
+        function copyText(text, $btn) {
+            function done(ok) {
+                var original = $btn.text();
+                $btn.text(ok ? 'Copied!' : 'Copy failed');
+                setTimeout(function () { $btn.text(original); }, 1500);
+            }
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+            } else {
+                var $ta = $('<textarea>').val(text).appendTo('body');
+                $ta.select();
+                var ok = false;
+                try { ok = document.execCommand('copy'); } catch (err) {}
+                $ta.remove();
+                done(ok);
+            }
+        }
+
+        $('.woo-rs-copy-url').on('click', function (e) {
+            e.preventDefault();
+            copyText(fullUrl, $(this));
+        });
+
+        $('.woo-rs-toggle-url').on('click', function (e) {
+            e.preventDefault();
+            var $btn    = $(this);
+            var showing = $btn.data('revealed');
+            $urlField.val(showing ? maskedUrl : fullUrl);
+            $btn.data('revealed', !showing).text(showing ? 'Reveal' : 'Hide');
+        });
+    }
+
     /* ── Auto-sync toggle: enable/disable interval field ── */
 
     var $autoSync  = $('#woo_rs_auto_sync');

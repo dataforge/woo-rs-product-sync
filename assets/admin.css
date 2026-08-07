@@ -18,16 +18,13 @@
     font-family: monospace;
     font-size: 13px;
     padding: 8px 10px;
-    cursor: pointer;
 }
 
-.woo-rs-product-sync-wrap .woo-rs-api-key {
-    display: inline-block;
-    margin-right: 10px;
-    padding: 4px 8px;
-    font-size: 13px;
-    background: #f0f0f0;
-    border-radius: 3px;
+.woo-rs-product-sync-wrap .woo-rs-webhook-url-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
 }
 
 /* ── Status table ── */

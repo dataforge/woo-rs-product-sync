@@ -530,10 +530,13 @@ class WOO_RS_Admin {
     /* ── Settings Tab ── */
 
     private static function render_settings_tab() {
-        $webhook_api_key = get_option( 'woo_rs_product_sync_api_key', '' );
-        $webhook_url     = rest_url( 'woo-rs-product-sync/v1/webhook' );
+        $webhook_api_key     = get_option( 'woo_rs_product_sync_api_key', '' );
+        $webhook_base        = rest_url( 'woo-rs-product-sync/v1/webhook' );
+        $webhook_url         = $webhook_base;
+        $masked_webhook_url  = $webhook_base;
         if ( $webhook_api_key ) {
-            $webhook_url = add_query_arg( 'key', $webhook_api_key, $webhook_url );
+            $webhook_url        = add_query_arg( 'key', $webhook_api_key, $webhook_base );
+            $masked_webhook_url = $webhook_base . '?key=' . self::mask_key( $webhook_api_key, 6 );
         }
 
         $rs_api_key_encrypted = get_option( 'woo_rs_product_sync_rs_api_key', '' );
@@ -561,14 +564,17 @@ class WOO_RS_Admin {
         <div class="card woo-rs-card">
             <h2>Webhook URL</h2>
             <p>Paste this URL into RepairShopr's webhook settings:</p>
-            <input type="text" readonly value="<?php echo esc_url( $webhook_url ); ?>" class="woo-rs-url-field" onclick="this.select();" />
-            <p class="description">This URL includes your API key for authentication.</p>
+            <div class="woo-rs-webhook-url-row">
+                <input type="text" readonly value="<?php echo esc_attr( $masked_webhook_url ); ?>" class="woo-rs-url-field" data-full-url="<?php echo esc_attr( $webhook_url ); ?>" data-masked-url="<?php echo esc_attr( $masked_webhook_url ); ?>" />
+                <button type="button" class="button woo-rs-copy-url">Copy URL</button>
+                <button type="button" class="button woo-rs-toggle-url">Reveal</button>
+            </div>
+            <p class="description">This URL includes your API key for authentication. The key is hidden on screen for security &mdash; use <strong>Copy URL</strong> to copy the full URL.</p>
         </div>
 
         <!-- Webhook API Key -->
         <div class="card woo-rs-card">
             <h2>Webhook API Key</h2>
-            <code class="woo-rs-api-key"><?php echo esc_html( self::mask_key( $webhook_api_key, 6 ) ); ?></code>
             <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline;">
                 <input type="hidden" name="action" value="woo_rs_product_sync_regenerate_key" />
                 <?php wp_nonce_field( 'woo_rs_product_sync_regenerate_key' ); ?>
